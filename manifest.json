@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.ramoncardena.omason",
+  "name": "omaSon",
+  "version": "0.1.0",
+  "author": "Ramon Cardena",
+  "license": "MIT",
+  "description": "Review Unison changes, resolve conflicts, synchronize replicas, and keep a local activity history.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "omaSon · Unison",
+    "description": "Unison profiles, change review, and synchronization history.",
+    "category": "Productivity",
+    "defaultSection": "right",
+    "allowMultiple": false,
+    "aliases": ["omason", "unison"],
+    "defaults": {},
+    "schema": []
+  }
+}

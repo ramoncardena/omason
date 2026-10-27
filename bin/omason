@@ -1,0 +1,648 @@
+#!/usr/bin/env python3
+"""A line-delimited JSON bridge to Unison's interactive text interface.
+
+The same child stays alive from scan through confirmation. No batch mode,
+rescan-and-apply, filesystem copying, or archive manipulation is used here.
+"""
+from __future__ import annotations
+
+import codecs
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import uuid
+
+ARROWS = r"---->|<----|--\?->|<-\?--|<-\?->|====>|<====|==\?=>|<=\?==|<=\?=>|<-M->|<=M=>|error"
+ROW = re.compile(r"([A-Za-z ]{8}) (" + ARROWS + r") ([A-Za-z ]{8})   ([^\n]*?)  (?=\[|\n|$)")
+PROMPT = re.compile(r"([A-Za-z ]{8}) (" + ARROWS + r") ([A-Za-z ]{8})   ([^\n]*?)  \[(?:f)?\] ")
+PROCEED = "Proceed with propagating updates? [] "
+FIRST_RUN = "Press return to continue.[<ret>] "
+BIG_DELETE = "Do you really want to proceed? [] "
+CHOICES = {"left": "<", "right": ">", "skip": "/", "default": "r", "next": "n"}
+CHOSEN = {"left": "<====", "right": "====>", "skip": "<=?=>"}
+# Listing metadata ("left : changed file  modified on … size 7 …"), the final
+# byte totals (always left→right, then right→left), and propagation progress. All are display-only; none of them drive input.
+INFO = re.compile(r"^(\S[^:\n]{0,60}?)\s*: (.+?)\s*$", re.M)
+SIZE = re.compile(r"\bsize (\d+)")
+MODIFIED = re.compile(r"modified on (\d{4}-\d\d-\d\d) at\s+(\d+:\d\d:\d\d)")
+TOTAL = re.compile(r"(\d[\d.]* ?[KMGT]?i?B) to be synced from ")
+SUMMARY = re.compile(r"(\d+) items? will be synced(?:, (\d+) skipped)?")
+END = re.compile(r"\[END\] (?:Updating file|Updating properties of|Copying properties for|Copying|Deleting) (.+)")
+PROGRESS = re.compile(r"(\d+)%\s+(\d+)/(\d+)")
+RESULT = re.compile(r"\((\d+) items? transferred, (\d+) skipped, (\d+) failed\)")
+HOST = socket.gethostname().split(".")[0]
+
+
+def describe(text):
+    size, modified = SIZE.search(text), MODIFIED.search(text)
+    return {"state": text.split("  ")[0].strip(), "size": int(size.group(1)) if size else None,
+            "modified": f"{modified.group(1)} {modified.group(2)}" if modified else ""}
+
+
+def replica(root):
+    """Classify a profile root for display: where it lives and whether it is reachable."""
+    for scheme in ("ssh", "socket"):
+        if root.startswith(scheme + "://"):
+            authority, _, path = root[len(scheme) + 3:].partition("/")
+            host = authority.rpartition("@")[2].split(":")[0]
+            path = path if path.startswith("/") else ("~/" + path if path else "~")
+            return {"root": root, "kind": scheme, "name": host, "path": path, "online": None}
+    path = Path(root).expanduser()
+    parts, shown = path.parts, str(path)
+    kind, name = "local", path.name or "/"
+    if len(parts) > 4 and parts[1:3] == ("run", "media"):
+        kind, name, shown = "removable", parts[4], "/" + "/".join(parts[5:])
+    elif len(parts) > 2 and parts[1] in ("media", "mnt"):
+        kind, name, shown = "removable", parts[2], "/" + "/".join(parts[3:])
+    else:
+        home = str(Path.home())
+        if shown == home or shown.startswith(home + "/"):
+            shown = "~" + shown[len(home):]
+            name = "Home" if shown == "~" else name
+    return {"root": root, "kind": kind, "name": name, "path": shown, "online": path.is_dir(), "host": HOST}
+
+
+def replicas(roots):
+    result = [replica(r) for r in roots]
+    # Two local folders with the same name: add the parent to tell them apart.
+    if len(result) == 2 and result[0]["name"] == result[1]["name"]:
+        for r in result:
+            if r["kind"] == "local":
+                r["name"] = "/".join(Path(r["path"]).parts[-2:])
+    return result
+
+
+def counts(items):
+    result = {"toRight": 0, "toLeft": 0, "held": 0, "conflicts": 0, "errors": 0}
+    for item in items:
+        arrow = item.get("arrow", "")
+        if arrow == "error":
+            result["errors"] += 1
+        elif "?" in arrow or "M" in arrow:
+            result["held"] += 1
+            result["conflicts"] += bool(item.get("conflict"))
+        elif arrow.endswith(">"):
+            result["toRight"] += 1
+        elif arrow.startswith("<"):
+            result["toLeft"] += 1
+    return result
+
+
+class Bridge:
+    def __init__(self, emit=None):
+        self.emit = emit or (lambda obj: print(json.dumps(obj, ensure_ascii=True), flush=True))
+        self.unison_dir = Path(os.environ.get("UNISON") or str(Path.home() / ".unison")).expanduser()
+        self.state_dir = Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "omason"
+        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.selector = selectors.DefaultSelector()
+        self.child = None
+        self.lock = None
+        self.log = None
+        self.log_size = 0
+        self.buffer = ""
+        self.tail = ""
+        self.decoders = {}
+        self.navigation = None
+        self.listing = False
+        self.listed = False
+        self.awaiting_details = False
+        self.committed = False
+        self.cancelled = False
+        # Panel choices wait here until Unison is back at a prompt.
+        self.queue = []
+        self.sync_requested = False
+        self.sync_text = {}
+        self.err_tail = ""
+        self.last_output = time.monotonic()
+        self.started = 0.0
+        self.run_id = ""
+        self.last_snapshot = 0.0
+        self.state = self.fresh("idle", "", "Choose a profile to review changes.")
+
+    def fresh(self, phase, profile, message):
+        return {"phase": phase, "profile": profile, "items": [], "current": "", "message": message, "details": "",
+                "detailsPath": "", "totals": {}, "progress": None, "result": None}
+
+    def snapshot(self):
+        self.last_snapshot = time.monotonic()
+        self.emit({"type": "state", **self.state, "run": self.run_id, "pending": len(self.queue),
+                   "syncRequested": self.sync_requested, "tail": self.tail[-12000:]})
+
+    def find(self, path):
+        return next((i for i in self.state["items"] if i["path"] == path), None)
+
+    def position(self, path):
+        return next((n for n, i in enumerate(self.state["items"]) if i["path"] == path), None)
+
+    def catalog(self):
+        profiles = []
+        for path in sorted(self.unison_dir.glob("*.prf")):
+            if path.name.startswith("-") or not path.is_file():
+                continue
+            roots, paths, ignores, label = [], [], 0, path.stem
+            try:
+                for line in path.read_text().splitlines():
+                    key, sep, value = line.partition("=")
+                    key = key.strip()
+                    if sep and key == "root":
+                        roots.append(value.strip())
+                    elif sep and key == "path":
+                        paths.append(value.strip())
+                    elif sep and key == "ignore":
+                        ignores += 1
+                    elif sep and key == "label":
+                        label = value.strip()
+                profiles.append({"name": path.stem, "label": label, "roots": roots, "replicas": replicas(roots),
+                                 "paths": paths, "ignores": ignores})
+            except (OSError, UnicodeError):
+                profiles.append({"name": path.stem, "label": label, "roots": [], "replicas": [], "error": "Cannot read profile"})
+        history = []
+        for path in sorted(self.state_dir.glob("*.json"), reverse=True)[:50]:
+            try:
+                record = json.loads(path.read_text())
+                record["counts"] = counts(record.get("items", []))
+                history.append(record)
+            except (OSError, ValueError, AttributeError):
+                continue
+        for profile in profiles:
+            last = next((r for r in history if r.get("profile") == profile["name"]), None)
+            profile["last"] = {k: last.get(k) for k in ("finished", "phase", "committed", "result", "counts")} if last else None
+        self.emit({"type": "catalog", "profiles": profiles, "history": history,
+                   "available": bool(shutil.which("unison")), "profileDirectory": str(self.unison_dir),
+                   "stateDirectory": str(self.state_dir)})
+
+    def create(self, request):
+        name = str(request.get("name", "")).strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_. -]{0,79}", name) or ".." in name:
+            raise ValueError("Use a profile name beginning with a letter or number, without slashes or '..'.")
+        roots = [str(request.get(k, "")).strip() for k in ("left", "right")]
+        if not all(roots) or any(any(c in r for c in "\r\n\x00") for r in roots):
+            raise ValueError("Enter two roots, each on one line.")
+        for i, root in enumerate(roots):
+            if root.startswith(("ssh://", "socket://")):
+                continue
+            path = Path(root).expanduser()
+            if not path.is_absolute() or not path.is_dir():
+                raise ValueError("Local roots must be existing absolute directories (or use ssh://user@host/path).")
+            roots[i] = str(path)
+        if roots[0] == roots[1]:
+            raise ValueError("The two roots must differ.")
+        self.unison_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # O_EXCL also refuses existing symlinks. Never overwrite a user profile.
+        fd = os.open(self.unison_dir / (name + ".prf"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(f"# Created by omaSon\nroot = {roots[0]}\nroot = {roots[1]}\n\n# Keep replaced and deleted versions in Unison's backup store.\nbackup = Name *\nmaxbackups = 5\n")
+        self.emit({"type": "created", "profile": name})
+        self.catalog()
+
+    def start(self, profile):
+        if self.child:
+            raise ValueError("Finish or cancel the current review first.")
+        if not isinstance(profile, str) or profile.startswith("-") or Path(profile).name != profile or not (self.unison_dir / (profile + ".prf")).is_file():
+            raise ValueError("Select an existing Unison profile.")
+        if not shutil.which("unison"):
+            raise ValueError("Install the unison package before scanning.")
+        self.lock = open(self.state_dir / "session.lock", "a+")
+        try:
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self.lock.close()
+            self.lock = None
+            raise ValueError("Another omaSon panel is reviewing or syncing. Finish that session first.")
+        self.started = time.time()
+        self.run_id = time.strftime("%Y%m%dT%H%M%S", time.gmtime(self.started)) + f"-{int((self.started % 1) * 1_000_000):06d}-" + uuid.uuid4().hex[:8]
+        self.buffer = self.tail = ""
+        self.log_size = 0
+        self.navigation = None
+        self.listing = self.listed = self.awaiting_details = self.committed = self.cancelled = self.sync_requested = False
+        self.queue = []
+        self.sync_text = {}
+        self.err_tail = ""
+        self.state = self.fresh("scanning", profile, "Looking for changes…")
+        self.log = open(self.state_dir / (self.run_id + ".log"), "x", encoding="utf-8")
+        os.chmod(self.log.name, 0o600)
+        env = {**os.environ, "UNISON": str(self.unison_dir), "LC_ALL": "C.UTF-8", "TERM": "dumb", "PAGER": "cat"}
+        # '=false' is required: '-batch false' means two extra roots in Unison!
+        command = ["unison", profile, "-ui", "text", "-dumbtty", "-color", "false",
+                   "-silent=false", "-terse=false", "-auto=false", "-batch=false",
+                   "-confirmbigdel=true", "-confirmmerge=true", "-repeat", "", "-retry", "0",
+                   "-sshargs", "-oBatchMode=yes -oStrictHostKeyChecking=yes -oConnectTimeout=15"]
+        try:
+            self.child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, env=env, start_new_session=True)
+        except Exception:
+            self.release()
+            raise
+        for kind, stream in (("stdout", self.child.stdout), ("stderr", self.child.stderr)):
+            os.set_blocking(stream.fileno(), False)
+            self.selector.register(stream, selectors.EVENT_READ, kind)
+            self.decoders[kind] = codecs.getincrementaldecoder("utf-8")("replace")
+        self.last_output = time.monotonic()
+        self.snapshot()
+
+    def send(self, command):
+        if not self.child or self.child.poll() is not None:
+            raise ValueError("The Unison session has ended. Scan again.")
+        self.child.stdin.write((command + "\n").encode())
+        self.child.stdin.flush()
+        self.last_output = time.monotonic()
+
+    def add_rows(self, text, info=False):
+        matches = list(ROW.finditer(text))
+        # A queued choice has already been shown to the user; Unison's reprint
+        # of the old direction while navigating to it must not undo that.
+        queued = {op["path"] for op in self.queue if op["kind"] == "choose"}
+        for n, match in enumerate(matches):
+            left, arrow, right, path = match.groups()
+            item = {"path": path, "left": left.strip() or "unchanged", "right": right.strip() or "unchanged",
+                    "arrow": arrow, "conflict": "?" in arrow and arrow in ("<-?->", "<=?=>"),
+                    "action": "skip" if arrow in ("<-?->", "<=?=>") else "default"}
+            if info:
+                following = text[match.end():matches[n + 1].start() if n + 1 < len(matches) else len(text)]
+                sides = [m.group(2) for m in INFO.finditer(following)][:2]
+                if len(sides) == 2:
+                    item["leftInfo"], item["rightInfo"] = describe(sides[0]), describe(sides[1])
+            existing = self.find(path)
+            if existing:
+                keep = {k: existing[k] for k in ("action", "arrow") if k == "action" or path in queued}
+                existing.update(item)
+                existing.update(keep)
+            else:
+                item["recommended"] = arrow
+                self.state["items"].append(item)
+
+    def track_progress(self, text, kind="stdout"):
+        *lines, self.sync_text[kind] = (self.sync_text.get(kind, "") + text).split("\n")
+        for line in lines:
+            done = END.search(line)
+            item = self.find(done.group(1).rstrip("\r")) if done else None
+            if item:
+                item["done"] = True
+        progress = list(PROGRESS.finditer(text))
+        if progress:
+            percent, finished, total = (int(g) for g in progress[-1].groups())
+            self.state["progress"] = {"percent": percent, "done": finished, "total": total}
+
+    def consume(self, text):
+        if self.state["phase"] in ("syncing", "cancelling"):
+            self.buffer = (self.buffer + text)[-1000:]
+            self.track_progress(text)
+            if "Commit results of merge?" in self.buffer:
+                self.cancel()
+                self.emit({"type": "error", "error": "Interactive merges are not supported. Choose a replica or skip the merge."})
+            if time.monotonic() - self.last_snapshot > 0.25:
+                self.snapshot()
+            return
+        self.buffer += text.replace("\r", "")
+        # Only recognize complete, exact prompts on stdout. Unknown questions
+        # receive no automatic input and eventually fail closed via timeout.
+        if FIRST_RUN in self.buffer or BIG_DELETE in self.buffer:
+            marker = FIRST_RUN if FIRST_RUN in self.buffer else BIG_DELETE
+            before, self.buffer = self.buffer.split(marker, 1)
+            self.state.update(phase="warning", message=before.strip()[-10000:], warning="first-run" if marker == FIRST_RUN else "big-delete")
+            self.snapshot()
+            return
+        if PROCEED in self.buffer:
+            before, self.buffer = self.buffer.split(PROCEED, 1)
+            self.add_rows(before)
+            self.state["totals"].update(self.totals(before))
+            self.state["current"] = ""
+            self.rest("ready")
+            return
+        match = PROMPT.search(self.buffer)
+        if not match:
+            if len(self.buffer) > 4_000_000:
+                self.cancel()
+                raise ValueError("Unison output exceeded the adapter limit; session cancelled.")
+            return
+        segment, self.buffer = self.buffer[:match.end()], self.buffer[match.end():]
+        self.add_rows(segment, info=self.listing and not self.listed)
+        self.listed = self.listing
+        path = match.group(4)
+        self.state["current"] = path
+        if not self.listing:
+            # 'l' prints every remaining item with metadata, then returns to
+            # the same item. It never changes direction or propagates files.
+            self.listing = True
+            self.send("l")
+            return
+        if self.navigation:
+            if path == self.navigation:
+                self.navigation = None
+            else:
+                self.send("n")
+                return
+        if self.awaiting_details:
+            self.state["details"] = segment[:match.start()].strip()[-40000:]
+            self.state["detailsPath"] = path
+            self.awaiting_details = False
+        self.rest("review")
+
+    def totals(self, text):
+        result = {}
+        summary = SUMMARY.search(text)
+        if summary:
+            result["items"], result["skipped"] = int(summary.group(1)), int(summary.group(2) or 0)
+        for key, match in zip(("toRight", "toLeft"), TOTAL.finditer(text)):
+            result[key] = match.group(1)
+        return result
+
+    def rest(self, phase):
+        """Unison is waiting at an item prompt ("review") or the final confirmation ("ready").
+
+        Apply the next queued panel choice, continue a requested sync, or settle.
+        """
+        while self.queue:
+            op = self.queue[0]
+            target = self.position(op["path"])
+            if target is None:
+                self.queue.pop(0)
+                continue
+            if phase == "review" and self.state["current"] == op["path"]:
+                self.queue.pop(0)
+                if op["kind"] == "inspect":
+                    self.awaiting_details = True
+                    self.send("d")
+                    message = "Loading diff…"
+                else:
+                    self.send(CHOICES[op["choice"]])
+                    message = "Applying your choices…"
+                self.state.update(phase="scanning", message=message)
+                self.snapshot()
+                return
+            # '0' returns to the first item; 'n' keeps the current direction and moves on.
+            self.navigation = op["path"]
+            current = self.position(self.state["current"])
+            self.send("n" if phase == "ready" or (current is not None and target > current) else "0")
+            self.state.update(phase="scanning", message="Applying your choices…")
+            self.snapshot()
+            return
+        if self.sync_requested and phase == "review":
+            # 's' keeps the displayed direction of every remaining item.
+            self.send("s")
+            self.state.update(phase="scanning", message="Preparing to sync…")
+            self.snapshot()
+            return
+        if self.sync_requested:
+            self.sync_requested = False
+            try:
+                self.confirm()
+                return
+            except ValueError as exc:
+                self.emit({"type": "error", "error": str(exc)})
+        message = ("Choose a direction for each change, or keep Unison’s recommendation." if phase == "review"
+                   else "Review complete. Sync applies the directions shown below.")
+        self.state.update(phase=phase, message=message)
+        self.snapshot()
+
+    def confirm(self):
+        if any("M" in i["arrow"] for i in self.state["items"]):
+            raise ValueError("Select each merge and choose a replica or Skip before syncing. Interactive merges are not supported yet.")
+        # This is the ONLY place where the transfer-confirmation input is sent.
+        self.committed = True
+        self.send("y")
+        self.state.update(phase="syncing", message="Synchronizing…",
+                          progress={"percent": 0, "done": 0, "total": self.state["totals"].get("items", 0)})
+        self.snapshot()
+
+    def handle(self, request):
+        cmd = request.get("command")
+        phase = self.state["phase"]
+        if cmd == "catalog":
+            self.catalog()
+        elif cmd == "create":
+            self.create(request)
+        elif cmd == "start":
+            self.start(request.get("profile"))
+        elif cmd == "acknowledge" and phase == "warning":
+            self.send("" if self.state.get("warning") == "first-run" else "y")
+            self.state.update(phase="scanning", message="Looking for changes…")
+            self.snapshot()
+        elif cmd == "choose" and phase == "review":
+            choice = request.get("choice")
+            if choice not in CHOICES:
+                raise ValueError("Unknown direction.")
+            current = next(i for i in self.state["items"] if i["path"] == self.state["current"])
+            if choice != "next":
+                current["action"] = choice
+                if choice == "left": current["arrow"] = "<===="
+                elif choice == "right": current["arrow"] = "====>"
+                elif choice == "skip": current["arrow"] = "<=?=>"
+            self.state.update(phase="scanning", details="", message="Updating review…")
+            self.send(CHOICES[choice])
+            self.snapshot()
+        elif cmd == "select" and phase in ("review", "ready"):
+            path = request.get("path")
+            if not any(i["path"] == path for i in self.state["items"]):
+                raise ValueError("Unknown change.")
+            if any(i["path"] == path and i["arrow"] == "error" for i in self.state["items"]):
+                raise ValueError("Unison cannot act on this path. Inspect its error in the session log.")
+            self.navigation = path
+            self.send("n" if phase == "ready" else "0")
+            self.state.update(phase="scanning", details="", message="Opening change…")
+            self.snapshot()
+        elif cmd in ("details", "diff") and phase == "review":
+            self.awaiting_details = True
+            self.send("x" if cmd == "details" else "d")
+            self.state.update(phase="scanning", message="Loading details…")
+            self.snapshot()
+        elif cmd == "finish" and phase == "review":
+            self.send("s")
+            self.state.update(phase="scanning", message="Preparing summary…")
+            self.snapshot()
+        elif cmd == "sync" and phase == "ready":
+            self.confirm()
+        elif cmd in ("set", "inspect") and self.child and self.listed and phase in ("review", "ready", "scanning"):
+            # Any row, in any order: queued, then applied by navigating Unison's held list.
+            path, choice = request.get("path"), request.get("choice", "")
+            item = self.find(path)
+            if not item:
+                raise ValueError("Unknown change.")
+            if item["arrow"] == "error":
+                raise ValueError("Unison cannot act on this path. Inspect its error in the session log.")
+            if self.sync_requested:
+                raise ValueError("Sync is starting; directions are locked.")
+            if cmd == "set":
+                if choice not in CHOSEN and choice != "default":
+                    raise ValueError("Unknown direction.")
+                item["arrow"] = CHOSEN.get(choice) or item.get("recommended", item["arrow"])
+                item["action"] = choice
+                self.queue = [op for op in self.queue if not (op["kind"] == "choose" and op["path"] == path)]
+                self.queue.append({"kind": "choose", "path": path, "choice": choice})
+            elif not any(op["kind"] == "inspect" and op["path"] == path for op in self.queue):
+                self.queue.append({"kind": "inspect", "path": path})
+            if phase == "scanning":
+                self.snapshot()
+            else:
+                self.rest(phase)
+        elif cmd == "apply" and self.child and self.listed and phase in ("review", "ready", "scanning"):
+            if any("M" in i["arrow"] for i in self.state["items"]):
+                raise ValueError("Select each merge and choose a replica or Skip before syncing. Interactive merges are not supported yet.")
+            # An explicit request from the panel's Sync button. Pending choices are
+            # applied first; the confirmation itself is still sent only by confirm().
+            self.sync_requested = True
+            if phase == "scanning":
+                self.snapshot()
+            else:
+                self.rest(phase)
+        elif cmd == "cancel":
+            self.cancel()
+        else:
+            raise ValueError("That action is unavailable in the current session.")
+
+    def cancel(self):
+        if not self.child or self.cancelled:
+            return
+        self.cancelled = True
+        # Unison handles SIGINT gracefully, including during propagation.
+        try:
+            os.kill(self.child.pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+        self.state.update(phase="cancelling", message="Stopping Unison; waiting for it to release its archives…")
+        self.snapshot()
+
+    def release(self):
+        if self.log:
+            self.log.close()
+            self.log = None
+        if self.lock:
+            fcntl.flock(self.lock, fcntl.LOCK_UN)
+            self.lock.close()
+            self.lock = None
+
+    def complete(self, code):
+        found = RESULT.search(self.tail)
+        result = dict(zip(("transferred", "skipped", "failed"), map(int, found.groups()))) if found else None
+        if self.cancelled:
+            phase, message = "cancelled", "Session stopped. Any completed transfers remain applied." if self.committed else "Review cancelled. No transfers started."
+        elif code == 0:
+            phase, message = "complete", "Synchronization complete." if self.committed else "No updates to propagate."
+        elif code == 1:
+            phase, message = "partial", "Finished with skipped or partially transferred items. Review the log."
+        else:
+            phase, message = "error", f"Unison exited with code {code}. See the session log."
+        if result and self.committed and not self.cancelled:
+            message = f"Synced {result['transferred']} item{'s' if result['transferred'] != 1 else ''}"
+            message += f", {result['skipped']} held" if result["skipped"] else ""
+            message += f", {result['failed']} failed." if result["failed"] else "."
+        if self.committed and code == 0 and not self.cancelled:
+            for item in self.state["items"]:
+                if "?" not in item["arrow"] and item["arrow"] != "error":
+                    item["done"] = True
+        record = {"id": self.run_id, "profile": self.state["profile"], "started": self.started,
+                  "finished": time.time(), "phase": phase, "committed": self.committed, "result": result,
+                  "exitCode": code, "items": self.state["items"], "logPath": str(self.state_dir / (self.run_id + ".log")), "message": message}
+        self.queue = []
+        self.sync_requested = False
+        self.state["result"] = result
+        path = self.state_dir / (self.run_id + ".json")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(record, f)
+        self.state.update(phase=phase, message=message, current="")
+        self.child.stdin.close()
+        self.child = None
+        self.release()
+        self.snapshot()
+        self.catalog()
+        # Bound local retention to the most recent 50 sessions.
+        for old in sorted(self.state_dir.glob("*.json"), reverse=True)[50:]:
+            old.with_suffix(".log").unlink(missing_ok=True)
+            old.unlink(missing_ok=True)
+
+    def pump(self, timeout=0.1):
+        for key, _ in self.selector.select(timeout):
+            stream, kind = key.fileobj, key.data
+            data = os.read(stream.fileno(), 65536)
+            if not data:
+                self.selector.unregister(stream)
+                stream.close()
+                continue
+            text = self.decoders[kind].decode(data)
+            self.last_output = time.monotonic()
+            self.tail = (self.tail + text)[-12000:]
+            if self.log and self.log_size < 8_000_000:
+                self.log.write(text)
+                self.log.flush()
+                self.log_size += len(data)
+            if kind == "stdout":
+                self.consume(text)
+                continue
+            # Unison prints the byte totals and transfer progress on stderr.
+            # Chunks can split lines, so parse from the latest summary onward.
+            self.err_tail = (self.err_tail + text)[-8000:]
+            latest = list(SUMMARY.finditer(self.err_tail))
+            if latest:
+                self.state["totals"].update(self.totals(self.err_tail[latest[-1].start():]))
+            if self.state["phase"] in ("syncing", "cancelling"):
+                self.track_progress(text, kind)
+                if time.monotonic() - self.last_snapshot > 0.25:
+                    self.snapshot()
+        if self.child and self.child.poll() is not None and not self.selector.get_map():
+            self.complete(self.child.returncode)
+        if self.child and self.state["phase"] == "scanning" and time.monotonic() - self.last_output > 120:
+            self.emit({"type": "error", "error": "Unison stopped responding or asked an unsupported question. Review the log, then scan again."})
+            self.cancel()
+
+    def close(self):
+        if self.child:
+            self.cancel()
+            # Keep the global lock until Unison has finished cleaning up.
+            while self.child:
+                self.pump()
+        self.release()
+
+
+def main():
+    os.umask(0o077)
+    if sys.argv[1:] != ["serve"]:
+        print("Usage: omason serve (JSON lines on stdin/stdout)", file=sys.stderr)
+        return 2
+    bridge = Bridge()
+    stop = False
+    def stopping(*_):
+        nonlocal stop
+        stop = True
+    signal.signal(signal.SIGTERM, stopping)
+    signal.signal(signal.SIGINT, stopping)
+    input_selector = selectors.DefaultSelector()
+    input_selector.register(sys.stdin, selectors.EVENT_READ)
+    os.set_blocking(sys.stdin.fileno(), False)
+    pending = b""
+    bridge.catalog()
+    bridge.snapshot()
+    try:
+        while not stop:
+            if input_selector.select(0):
+                chunk = os.read(sys.stdin.fileno(), 65536)
+                if not chunk:
+                    break
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    try:
+                        bridge.handle(json.loads(line))
+                    except (ValueError, OSError, StopIteration) as exc:
+                        bridge.emit({"type": "error", "error": str(exc)})
+                if len(pending) > 1_000_000:
+                    break
+            bridge.pump()
+    except BrokenPipeError:
+        bridge.emit = lambda _: None
+    finally:
+        bridge.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
