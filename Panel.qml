@@ -45,7 +45,13 @@ Panel {
     readonly property bool syncing: phase === "syncing" || phase === "cancelling"
     // Set once a sync has started in this session, so "cancelling" can say Stopping.
     property bool committing: false
-    onPhaseChanged: if (phase === "syncing") committing = true; else if (phase === "scanning" && !sessionState.items.length) committing = false
+    onPhaseChanged: {
+        if (phase === "syncing") committing = true
+        else if (phase === "scanning" && !sessionState.items.length) committing = false
+        // A cancelled review has nothing to show: go straight back to the profile.
+        // Finished, failed and stopped syncs keep their result on screen.
+        else if (phase === "cancelled" && !committing) dismissedRun = sessionState.run
+    }
     readonly property bool sessionVisible: host.busy || (finished && !!sessionState.run && sessionState.run !== dismissedRun)
     readonly property string view: sessionVisible ? "session" : (creating ? "create" : (record ? "record" : "home"))
     readonly property var shownItems: view === "record" ? (record.items || []) : (view === "session" ? sessionState.items : [])

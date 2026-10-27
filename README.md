@@ -74,8 +74,8 @@ omarchy-shell shell summon io.github.ramoncardena.omason '{}'
    log; the file list is a record of the plan, not a claim that every item
    succeeded.
 
-Closing the popup keeps its session alive. **Cancel** ends a review; nothing
-has been copied at that point. **Stop sync** (shown only while files are being
+Closing the popup keeps its session alive. **Cancel** ends a review and returns
+to the profile; nothing has been copied at that point. **Stop sync** (shown only while files are being
 transferred) asks Unison to stop gracefully and waits for its archives to be
 released. Completed transfers remain applied if a sync is stopped. Disabling the plugin closes its helper input and
 also requests a graceful stop. Another monitor's instance cannot start a second
