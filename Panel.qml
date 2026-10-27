@@ -51,9 +51,12 @@ Panel {
         && (phase === "review" || phase === "ready" || phase === "scanning")
     readonly property bool canSync: editable && tally.toRight + tally.toLeft > 0 && tally.merges === 0
     readonly property bool syncRowVisible: view === "session" && sessionState.items.length > 0 && phase !== "warning"
-    readonly property var recent: Model.recentRuns(host.history, 3)
     readonly property var homeList: Model.profileGroups(host.profiles)
-    readonly property int targetCount: view === "home" ? homeList.rows.length + 1 + recent.length
+    readonly property var selected: profileNamed(host.selectedProfile)
+    readonly property var profileOptions: homeList.rows.map(function(p) { return { value: p.name, label: p.label, description: Model.profileDescription(p, root.now) } })
+    readonly property var recent: Model.recentRuns(host.history.filter(function(r) { return r.profile === root.host.selectedProfile }), 3)
+    readonly property bool canScan: !host.busy && host.available && !!selected && !Model.offlineReplica(selected)
+    readonly property int targetCount: view === "home" ? (host.profiles.length ? 2 + recent.length : 1)
         : (view === "session" ? plan.rows.length + (syncRowVisible ? 1 : 0) : (view === "record" ? plan.rows.length : 0))
 
     readonly property var scanPhrases: ["Comparing replicas", "Reading archives", "Walking both trees", "Spotting differences", "Checking fingerprints"]
@@ -87,6 +90,19 @@ Panel {
         showLog = false
         if (root.hostWidget) root.hostWidget.selectedProfile = name
         send("start", { profile: name })
+    }
+    function selectProfile(name) { if (root.hostWidget && name) root.hostWidget.selectedProfile = name }
+    function cycleProfile(step) {
+        const rows = homeList.rows
+        if (!rows.length) return
+        const at = rows.findIndex(function(p) { return p.name === root.host.selectedProfile })
+        selectProfile(rows[(Math.max(0, at) + step + rows.length) % rows.length].name)
+    }
+    function scanLabel() {
+        const offline = Model.offlineReplica(selected)
+        if (offline) return offline.name + " is not connected"
+        if (host.busy) return "Another session is running"
+        return "Scan for changes"
     }
     function setDirection(item, choice) {
         if (!editable || !item || item.arrow === "error") return
@@ -131,6 +147,8 @@ Panel {
             if (!cursorActive) { cursorActive = true; return }
             cursor = Math.max(0, Math.min(targetCount - 1, cursor + dy))
             scrollToCursor()
+        } else if (dx !== 0 && view === "home") {
+            cycleProfile(dx > 0 ? 1 : -1)
         } else if (dx !== 0 && cursorActive && cursorRow() && view === "session") {
             setDirection(cursorRow(), dx > 0 ? "right" : "left")
         }
@@ -138,10 +156,10 @@ Panel {
     function activate() {
         if (!cursorActive) { cursorActive = true; return }
         if (view === "home") {
-            const profiles = homeList.rows
-            if (cursor < profiles.length) startScan(profiles[cursor].name)
-            else if (cursor === profiles.length) openCreate()
-            else record = recent[cursor - profiles.length - 1]
+            if (!host.profiles.length) openCreate()
+            else if (cursor === 0) profilePicker.open()
+            else if (cursor === 1) startScan(host.selectedProfile)
+            else record = recent[cursor - 2]
         } else if (cursorRow()) {
             toggleExpand(cursorRow())
         } else if (view === "session") {
@@ -153,7 +171,8 @@ Panel {
         const row = cursorActive ? cursorRow() : null
         if (text === "\b") back()
         else if (view === "home" && text === "n") openCreate()
-        else if (view === "home" && text === "r") startScan((homeList.rows[cursor] || homeList.rows[0] || {}).name)
+        else if (view === "home" && text === "r") startScan(host.selectedProfile)
+        else if (view === "home" && text === "p" && host.profiles.length) profilePicker.open()
         else if (view === "session" && text === "r" && finished) { const name = sessionState.profile; done(); startScan(name) }
         else if (view === "session" && text === "u" && row) setDirection(row, "default")
         else if (view === "session" && text === "d" && row) inspect(row)
@@ -165,9 +184,7 @@ Panel {
         Qt.callLater(function() {
             let item = null
             if (view === "home") {
-                const count = homeList.rows.length
-                const entry = homeList.entries.findIndex(function(e) { return !e.header && e.index === cursor })
-                item = cursor < count ? profileRepeater.itemAt(entry) : (cursor === count ? newProfileRow : recentRepeater.itemAt(cursor - count - 1))
+                item = cursor === 0 ? profilePicker : (cursor === 1 ? scanButton : recentRepeater.itemAt(cursor - 2))
             } else if (cursor < plan.rows.length) {
                 item = planRepeater.itemAt(plan.rowEntry[cursor])
             } else {
@@ -224,7 +241,7 @@ Panel {
         return "Sync " + count + (count === 1 ? " change" : " changes") + (tally.held ? " · hold " + tally.held : "")
     }
     function hint() {
-        if (view === "home") return "↑↓ move · ⏎ scan · N new profile · Esc close"
+        if (view === "home") return "←→ profile · P search · ⏎ scan · N new profile · Esc close"
         if (view === "record") return "↑↓ move · ⏎ details · ⌫ back"
         if (view === "create") return "⏎ next field · Esc cancel"
         if (finished) return "R scan again · ⏎ / ⌫ done · V output"
@@ -261,7 +278,7 @@ Panel {
         PanelKeyCatcher {
             id: keyCatcher
             anchors.fill: parent
-            blocked: root.creating && root.view === "create"
+            blocked: (root.creating && root.view === "create") || profilePicker.popupOpen
             onCloseRequested: root.close()
             onTabRequested: function(direction) { root.switchPanel(direction) }
             onMoveRequested: function(dx, dy) { root.move(dx, dy) }
@@ -360,46 +377,85 @@ Panel {
 
                         PanelSeparator { foreground: root.foreground }
 
-                        Column {
+                        SearchableDropdown {
+                            id: profilePicker
+                            visible: root.host.profiles.length > 0
                             width: parent.width
-                            spacing: Style.space(4)
-                            Repeater {
-                                id: profileRepeater
-                                model: root.view === "home" ? root.homeList.entries : []
-                                Column {
-                                    id: homeEntry
-                                    required property var modelData
-                                    required property int index
-                                    width: parent.width
-                                    topPadding: modelData.header && index > 0 ? Style.space(10) : 0
-                                    bottomPadding: modelData.header ? Style.space(4) : 0
-                                    PairHeader {
-                                        visible: homeEntry.modelData.header
-                                        width: parent.width
-                                        group: homeEntry.modelData.header ? homeEntry.modelData.group : null
-                                    }
-                                    ProfileRow {
-                                        visible: !homeEntry.modelData.header
-                                        width: parent.width
-                                        name: homeEntry.modelData.header ? "" : homeEntry.modelData.name
-                                        profile: homeEntry.modelData.header ? null : homeEntry.modelData.profile
-                                        rowIndex: homeEntry.modelData.header ? -1 : homeEntry.modelData.index
-                                    }
-                                }
+                            label: "PROFILE"
+                            placeholderText: "Search profiles…"
+                            emptyText: "No matching profile"
+                            options: root.profileOptions
+                            value: root.host.selectedProfile
+                            fontFamily: root.family
+                            hasCursor: root.cursorActive && root.cursor === 0
+                            onHovered: function(isHovered) { if (isHovered) root.setCursor(0) }
+                            onChanged: function(value) {
+                                root.selectProfile(value)
+                                root.setCursor(1)
+                                keyCatcher.forceActiveFocus()
                             }
-                            ListRow {
-                                id: newProfileRow
+                        }
+
+                        BridgeCard {
+                            visible: !!root.selected
+                            width: parent.width
+                            leftSide: Model.replicaOf(root.selected, 0)
+                            rightSide: Model.replicaOf(root.selected, 1)
+                            preview: true
+                        }
+
+                        Column {
+                            visible: !!root.selected
+                            width: parent.width
+                            spacing: Style.spacing.labelGap
+                            InfoPair { label: "Covers"; value: Model.profileCoverage(root.selected) }
+                            InfoPair {
+                                visible: !!root.selected && root.selected.ignores > 0
+                                label: "Ignores"
+                                value: root.selected ? root.selected.ignores + (root.selected.ignores === 1 ? " rule" : " rules") : ""
+                            }
+                            InfoPair {
+                                readonly property var last: root.selected ? root.selected.last : null
+                                label: "Last run"
+                                value: last ? Model.runSummary(last) + " · " + Model.relativeTime(last.finished, root.now) : "Never synced"
+                                valueColor: last && (last.phase === "error" || last.phase === "partial") ? root.urgent : root.foreground
+                            }
+                        }
+
+                        Button {
+                            id: scanButton
+                            visible: root.host.profiles.length > 0
+                            width: parent.width
+                            text: root.scanLabel()
+                            bordered: true
+                            selected: root.canScan
+                            hasCursor: root.cursorActive && root.cursor === 1
+                            enabled: root.canScan
+                            opacity: enabled ? 1 : 0.55
+                            fontFamily: root.family
+                            onHovered: function(isHovered) { if (isHovered) root.setCursor(1) }
+                            onClicked: root.startScan(root.host.selectedProfile)
+                        }
+
+                        // No profiles yet.
+                        Column {
+                            visible: root.host.profiles.length === 0
+                            width: parent.width
+                            spacing: Style.space(10)
+                            Caption { text: "No Unison profiles in " + root.host.profileDirectory + " yet. Pair two folders, a drive, or an SSH host to start." }
+                            Button {
                                 width: parent.width
-                                rowIndex: root.homeList.rows.length
-                                glyphText: Model.glyph.added
-                                title: "New profile"
-                                caption: root.host.profiles.length ? "Pair two folders, a drive, or an SSH host" : "No profiles in " + root.host.profileDirectory + " yet. Start here."
-                                onActivated: root.openCreate()
+                                text: "New profile"
+                                bordered: true
+                                hasCursor: root.cursorActive && root.cursor === 0
+                                fontFamily: root.family
+                                onHovered: function(isHovered) { if (isHovered) root.setCursor(0) }
+                                onClicked: root.openCreate()
                             }
                         }
 
                         PanelSeparator { visible: root.recent.length > 0; foreground: root.foreground }
-                        PanelSectionHeader { visible: root.recent.length > 0; text: "RECENT"; foreground: root.foreground; fontFamily: root.family }
+                        PanelSectionHeader { visible: root.recent.length > 0; text: "RECENT RUNS"; foreground: root.foreground; fontFamily: root.family }
                         Column {
                             visible: root.recent.length > 0
                             width: parent.width
@@ -412,11 +468,11 @@ Panel {
                                     required property var modelData
                                     required property int index
                                     width: parent.width
-                                    rowIndex: root.homeList.rows.length + 1 + index
+                                    rowIndex: 2 + index
                                     glyphText: Model.statusGlyph(modelData.phase)
                                     glyphColor: modelData.phase === "error" || modelData.phase === "partial" ? root.urgent : root.foreground
-                                    title: (root.profileNamed(modelData.profile) || { label: modelData.profile }).label
-                                    caption: Model.runSummary(modelData)
+                                    title: Model.runSummary(modelData)
+                                    caption: Qt.formatDateTime(new Date(modelData.finished * 1000), "ddd dd MMM · HH:mm")
                                     trailing: Model.relativeTime(modelData.finished, root.now)
                                     onActivated: root.record = recentRow.modelData
                                 }
@@ -728,80 +784,35 @@ Panel {
         }
     }
 
-    component ProfileRow: ListRow {
-        id: profileRow
-        property var profile: null
-        property string name: ""
-        readonly property var offline: Model.offlineReplica(profile)
-        readonly property var last: profile ? profile.last : null
-
-        glyphText: Model.glyph.folder
-        glyphColor: root.dim
-        title: name || (profile ? profile.label : "")
-        caption: Model.profileScope(profile, name)
-        trailing: last ? Model.relativeTime(last.finished, root.now) : "never synced"
-        trailingGlyph: last ? Model.statusGlyph(last.phase) : ""
-        trailingColor: last && (last.phase === "error" || last.phase === "partial") ? root.urgent : (last && last.phase === "complete" ? root.accent : root.dim)
-        contentOpacity: offline ? 0.7 : 1
-        enabled: !root.host.busy
-        onActivated: if (profile) root.startScan(profile.name)
-    }
-
-    // "Home ⇄ PERSONAL_SSD /Gator" above the profiles that share those roots.
-    component PairHeader: Item {
-        id: pair
-        property var group: null
-        readonly property bool offline: !!(group && group.offline)
-        implicitHeight: pairRow.implicitHeight
-
-        RowLayout {
-            id: pairRow
+    component InfoPair: Item {
+        id: info
+        property string label: ""
+        property string value: ""
+        property color valueColor: root.foreground
+        width: parent ? parent.width : implicitWidth
+        implicitHeight: Math.max(infoLabel.implicitHeight, infoValue.implicitHeight)
+        Text {
+            id: infoLabel
             anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.leftMargin: Style.space(10)
-            anchors.rightMargin: Style.space(10)
-            spacing: Style.space(6)
-
-            PairSide { replica: pair.group ? pair.group.left : null }
-            Text { text: Model.glyph.swap; color: root.dim; font.family: root.family; font.pixelSize: Style.font.bodySmall }
-            PairSide { replica: pair.group ? pair.group.right : null; Layout.fillWidth: true }
-            PanelSectionHeader {
-                visible: text !== ""
-                text: pair.offline ? "NOT CONNECTED" : (pair.group && pair.group.right.kind === "ssh" ? "SSH" : "")
-                foreground: pair.offline ? root.urgent : root.foreground
-                color: pair.offline ? root.urgent : Qt.darker(root.foreground, 1.4)
-                fontFamily: root.family
-            }
-        }
-    }
-
-    component PairSide: Row {
-        id: side
-        property var replica: null
-        spacing: Style.space(5)
-        Text {
-            text: Model.replicaGlyph(side.replica)
-            color: side.replica && side.replica.online === false ? root.urgent : root.foreground
-            font.family: root.family
-            font.pixelSize: Style.font.bodySmall
-            anchors.verticalCenter: parent.verticalCenter
-        }
-        Text {
-            text: side.replica ? side.replica.name.toUpperCase() : ""
-            color: root.foreground
-            font.family: root.family
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            font.letterSpacing: 1
-            anchors.verticalCenter: parent.verticalCenter
-        }
-        Text {
-            visible: !!side.replica && side.replica.path !== "~" && side.replica.path !== "/" && side.replica.kind !== "local"
-            text: side.replica ? side.replica.path : ""
+            anchors.leftMargin: Style.space(2)
+            textFormat: Text.PlainText
+            text: info.label
             color: root.dim
             font.family: root.family
-            font.pixelSize: Style.font.caption
-            anchors.verticalCenter: parent.verticalCenter
+            font.pixelSize: Style.font.bodySmall
+        }
+        Text {
+            id: infoValue
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(2)
+            width: Math.min(implicitWidth, parent.width - infoLabel.implicitWidth - Style.space(16))
+            horizontalAlignment: Text.AlignRight
+            textFormat: Text.PlainText
+            text: info.value
+            color: info.valueColor
+            font.family: root.family
+            font.pixelSize: Style.font.bodySmall
+            elide: Text.ElideLeft
         }
     }
 

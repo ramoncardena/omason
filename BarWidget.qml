@@ -41,8 +41,11 @@ BarWidget {
                 available = data.available
                 profileDirectory = data.profileDirectory
                 stateDirectory = data.stateDirectory
-                if (!profiles.some(function(p) { return p.name === root.selectedProfile }))
-                    selectedProfile = profiles.length ? profiles[0].name : ""
+                if (!profiles.some(function(p) { return p.name === root.selectedProfile })) {
+                    // Start on the most recently used profile that still exists.
+                    const recent = history.find(function(r) { return profiles.some(function(p) { return p.name === r.profile }) })
+                    selectedProfile = recent ? recent.profile : (profiles.length ? profiles[0].name : "")
+                }
             } else if (data.type === "state") {
                 session = data
             } else if (data.type === "created") {

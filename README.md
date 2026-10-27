@@ -39,10 +39,12 @@ omarchy-shell shell summon io.github.ramoncardena.omason '{}'
 
 ## Use
 
-1. **Profiles** lists every `~/.unison/*.prf` (or the `UNISON` directory
-   inherited by the shell) with its two replicas, the last sync and how it
-   went. A replica on an unplugged drive is flagged. Press Enter on a profile
-   to scan it. **New profile** (or `N`) pairs two existing local folders, or a
+1. The **profile picker** holds every `~/.unison/*.prf` (or the `UNISON`
+   directory inherited by the shell). Press `P` to search it by name, replica
+   or folder, or `←`/`→` to step through profiles. The panel opens on the
+   profile you used last. The selected profile shows its two replicas, what
+   it covers, its last run and its recent runs. A replica on an unplugged
+   drive is flagged and scanning waits until it is connected. **New profile** (or `N`) pairs two existing local folders, or a
    local folder and an SSH root such as `ssh://user@host//absolute/path`, with
    a live preview of both sides. New profiles enable Unison backups and keep
    five versions. Existing profile preferences are preserved.
@@ -80,8 +82,10 @@ preference editor.
 
 | Key | Action |
 | --- | --- |
-| ↑ ↓ / J K | Move between profiles, changes, and the Sync button |
-| Enter | Scan a profile · expand a change · press the focused button |
+| P | Search profiles |
+| ← → / H L (main screen) | Previous / next profile |
+| ↑ ↓ / J K | Move between controls, changes, and the Sync button |
+| Enter | Scan · expand a change · press the focused button |
 | ← → / H L | Send the focused change to the left / right replica |
 | X / U | Hold the change / restore Unison's suggestion |
 | D | Show Unison's diff for the focused change |

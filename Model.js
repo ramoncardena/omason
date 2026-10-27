@@ -242,6 +242,22 @@ function profileScope(profile, name) {
   return parts.join("  ·  ")
 }
 
+function profileCoverage(profile) {
+  if (!profile) return ""
+  return profile.paths && profile.paths.length ? profile.paths.join(", ") : "Entire replica"
+}
+
+// Second line of a picker option; the search matches it too ("ssd", "desktop").
+function profileDescription(profile, nowMs) {
+  var left = replicaOf(profile, 0), right = replicaOf(profile, 1)
+  var parts = [left.name + " " + glyph.swap + " " + right.name]
+  if (profile.paths && profile.paths.length) parts.push(profile.paths.join(", "))
+  var offline = offlineReplica(profile)
+  if (offline) parts.push(offline.name + " not connected")
+  else parts.push(profile.last ? "last run " + relativeTime(profile.last.finished, nowMs) : "never synced")
+  return parts.join(" · ")
+}
+
 function offlineReplica(profile) {
   var replicas = profile && profile.replicas ? profile.replicas : []
   for (var i = 0; i < replicas.length; i++) if (replicas[i].online === false) return replicas[i]
