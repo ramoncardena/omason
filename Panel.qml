@@ -268,7 +268,7 @@ Panel {
         if (phase === "cancelling") return committing ? "Stopping safely" : "Cancelling"
         const result = sessionState.result
         if (phase === "complete" && !sessionState.items.length) return "Already in sync"
-        if ((phase === "complete" || phase === "partial") && result) {
+        if ((phase === "complete" || phase === "partial" || phase === "error") && result) {
             let text = "Synced " + result.transferred + (result.transferred === 1 ? " item" : " items")
             if (result.skipped) text += " · held " + result.skipped
             if (result.failed) text += " · failed " + result.failed
@@ -277,7 +277,7 @@ Panel {
         if (phase === "complete") return "Synced"
         if (phase === "partial") return "Partly synced"
         if (phase === "cancelled") return committing ? "Stopped" : "Cancelled · nothing copied"
-        if (phase === "error") return "Unison failed"
+        if (phase === "error") return "Unison could not finish"
         const changes = tally.total + (tally.total === 1 ? " change" : " changes")
         return tally.unresolved ? changes + " · " + tally.unresolved + (tally.unresolved === 1 ? " needs you" : " need you") : changes
     }
@@ -517,6 +517,14 @@ Panel {
                                 label: "Last run"
                                 value: last ? Model.runSummary(last) + " · " + Model.relativeTime(last.finished, root.now) : "Never synced"
                                 valueColor: last && (last.phase === "error" || last.phase === "partial") ? root.urgent : root.foreground
+                            }
+                            // Why the last run failed, so it can be fixed before scanning again.
+                            Caption {
+                                readonly property var last: root.selected ? root.selected.last : null
+                                visible: !!last && last.phase === "error" && !!last.message
+                                text: visible ? last.message : ""
+                                color: root.urgent
+                                horizontalAlignment: Text.AlignRight
                             }
                         }
 
@@ -1345,7 +1353,7 @@ Panel {
             FlowLine { glyphText: Model.glyph.left; count: root.tally.toLeft; size: root.sessionState.totals ? root.sessionState.totals.toLeft || "" : ""; tint: root.accent }
             FlowLine { glyphText: Model.glyph.conflict; count: root.tally.unresolved; tint: root.urgent }
             FlowLine { glyphText: Model.glyph.held; count: root.tally.held - root.tally.unresolved; tint: root.dim }
-            FlowLine { glyphText: Model.glyph.error; count: root.tally.errors; tint: root.urgent }
+            FlowLine { glyphText: Model.glyph.error; count: root.tally.errors + root.tally.failed; tint: root.urgent }
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 visible: bridge.preview || root.shownItems.length === 0
@@ -1488,7 +1496,8 @@ Panel {
         readonly property bool open: item !== null && root.expandedPath === item.path
         readonly property bool waiting: item !== null && Model.unresolved(item)
         readonly property bool readOnly: root.view !== "session" || !root.editable
-        readonly property color arrowTint: dir === "error" || waiting ? root.urgent : (dir === "held" ? root.dim : root.accent)
+        readonly property bool failed: !!item && !!item.failed
+        readonly property color arrowTint: dir === "error" || waiting || failed ? root.urgent : (dir === "held" ? root.dim : root.accent)
 
         hasCursor: root.cursorActive && root.cursor === rowIndex
         foreground: root.foreground
@@ -1519,8 +1528,8 @@ Panel {
                 Text {
                     id: rowGlyph
                     readonly property bool active: !!change.item && !!change.item.active && root.syncing
-                    text: change.item ? (change.item.done ? Model.glyph.check : (active ? Model.glyph.sync : Model.kindGlyph(change.item))) : ""
-                    color: change.item && (change.item.done || active) ? root.accent : root.dim
+                    text: !change.item ? "" : (change.failed ? Model.glyph.error : (change.item.done ? Model.glyph.check : (active ? Model.glyph.sync : Model.kindGlyph(change.item))))
+                    color: change.failed ? root.urgent : (change.item && (change.item.done || active) ? root.accent : root.dim)
                     RotationAnimation on rotation {
                         running: rowGlyph.active
                         from: 0; to: -360; duration: 1200; loops: Animation.Infinite
@@ -1545,10 +1554,11 @@ Panel {
                     }
                     Text {
                         Layout.fillWidth: true
-                        visible: change.parts.dir !== ""
+                        // A failed transfer says why, in place of the folder.
+                        visible: change.parts.dir !== "" || change.failed
                         textFormat: Text.PlainText
-                        text: change.parts.dir
-                        color: root.dim
+                        text: change.failed ? "Failed · " + (change.item.error || "see the log") + (change.parts.dir ? "  ·  " + change.parts.dir : "") : change.parts.dir
+                        color: change.failed ? root.urgent : root.dim
                         font.family: root.family
                         font.pixelSize: Style.font.caption
                         elide: Text.ElideMiddle

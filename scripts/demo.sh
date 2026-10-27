@@ -29,6 +29,7 @@ archives() {
 
 if [[ ${1:-} == --remove ]]; then
   mapfile -t files < <(archives)
+  [[ -d $demo ]] && chmod -R u+rwX -- "$demo"
   rm -rf -- "$demo"
   rm -f -- "$profile" "${files[@]}"
   echo "Removed $demo, $profile and ${#files[@]} archive file(s)."
@@ -38,6 +39,8 @@ fi
 command -v unison >/dev/null || { echo "unison is not installed" >&2; exit 1; }
 [[ -L $demo ]] && { echo "$demo is a symlink; refusing to reset it" >&2; exit 1; }
 
+# Make leftovers writable first (a test may have synced read-only folders).
+[[ -d $demo ]] && chmod -R u+rwX -- "$demo"
 rm -rf -- "$demo"
 mkdir -p -- "$left"/{notes,invoices,photos/2026} "$right" "$profiles"
 echo "todo v1" > "$left/notes/todo.md"

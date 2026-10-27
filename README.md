@@ -74,6 +74,17 @@ omarchy-shell shell summon io.github.ramoncardena.omason '{}'
    log; the file list is a record of the plan, not a claim that every item
    succeeded.
 
+**When something goes wrong.** A file that fails to transfer (permissions,
+a full disk, a file changed during the sync) is marked in red with Unison's
+reason, e.g. "Failed · Permission denied", while the rest of the sync still
+completes; the hero and the profile's last run show how many failed. If Unison
+cannot run at all, such as a replica that is not available, the reason is
+shown in plain words instead of an exit code. A replica that is present but
+empty (for example an unmounted drive's mount point) triggers Unison's
+deletion warning, which must be confirmed separately. When a session ends while
+the popup is closed, a desktop notification reports the result; clicking it
+reopens the panel. The bar icon stays highlighted after an error.
+
 Closing the popup keeps its session alive. **Cancel** ends a review and returns
 to the profile; nothing has been copied at that point. **Stop sync** (shown only while files are being
 transferred) asks Unison to stop gracefully and waits for its archives to be

@@ -66,12 +66,13 @@ function category(item) {
 }
 
 function counts(items) {
-  var result = { toRight: 0, toLeft: 0, held: 0, unresolved: 0, merges: 0, errors: 0, done: 0, total: 0 }
+  var result = { toRight: 0, toLeft: 0, held: 0, unresolved: 0, merges: 0, errors: 0, failed: 0, done: 0, total: 0 }
   for (var i = 0; i < (items || []).length; i++) {
     var item = items[i]
     var d = direction(item.arrow)
     result.total++
     if (item.done) result.done++
+    if (item.failed) result.failed++
     if (d === "right") result.toRight++
     else if (d === "left") result.toLeft++
     else if (d === "error") result.errors++

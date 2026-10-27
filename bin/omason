@@ -41,8 +41,35 @@ VERBS = r"(?:Updating file|Updating properties of|Copying properties for|Copying
 BEGIN = re.compile(r"\[BGN\] " + VERBS + r" (.+)")
 END = re.compile(r"\[END\] " + VERBS + r" (.+)")
 PROGRESS = re.compile(r"(\d+)%\s+(\d+)/(\d+)\s+\(([^)]*)\)")
+# "Failed [path]: Error in copying locally:" + "Permission denied [open(…)]",
+# and fatal errors such as a missing root: "Error: Cannot find canonical name of …".
+FAILED = re.compile(r"Failed \[(.+?)\]: ?(.*)")
+FATAL = re.compile(r"^(?:Fatal error|Error): (.+)$", re.M)
+MISSING_ROOT = re.compile(r"Cannot find canonical name of (.+?): unable to cd either to it \((?:.*: )?(.+?)\)\s*$")
 RESULT = re.compile(r"\((\d+) items? transferred, (\d+) skipped, (\d+) failed\)")
 HOST = socket.gethostname().split(".")[0]
+
+
+def reason(text):
+    """The useful end of a Unison error, without bracketed paths and temp names."""
+    text = re.sub(r"\s*\[[^\]]*\]", "", text).strip().rstrip(":")
+    parts = [p.strip() for p in text.split(":") if p.strip()]
+    return (parts[-1] if parts else text)[:200]
+
+
+def fatal(text):
+    """A readable sentence for Unison's last fatal error in `text`, or ''."""
+    found = FATAL.findall(text)
+    if not found:
+        return ""
+    detail = found[-1].strip()
+    missing = MISSING_ROOT.search(detail)
+    if missing:
+        path, why = missing.groups()
+        home = str(Path.home())
+        path = "~" + path[len(home):] if path.startswith(home + "/") else path
+        return f"{path} is not available ({why[:1].lower() + why[1:]})."
+    return detail[:300]
 
 
 def describe(text):
@@ -124,6 +151,7 @@ class Bridge:
         self.queue = []
         self.sync_requested = False
         self.sync_text = {}
+        self.failing = {}
         self.err_tail = ""
         self.last_output = time.monotonic()
         self.started = 0.0
@@ -180,7 +208,7 @@ class Bridge:
                 continue
         for profile in profiles:
             last = next((r for r in history if r.get("profile") == profile["name"]), None)
-            profile["last"] = {k: last.get(k) for k in ("finished", "phase", "committed", "result", "counts")} if last else None
+            profile["last"] = {k: last.get(k) for k in ("finished", "phase", "committed", "result", "counts", "message")} if last else None
         self.emit({"type": "catalog", "profiles": profiles, "history": history,
                    "available": bool(shutil.which("unison")), "profileDirectory": str(self.unison_dir),
                    "stateDirectory": str(self.state_dir)})
@@ -231,6 +259,7 @@ class Bridge:
         self.listing = self.listed = self.awaiting_details = self.committed = self.cancelled = self.sync_requested = False
         self.queue = []
         self.sync_text = {}
+        self.failing = {}
         self.err_tail = ""
         self.state = self.fresh("scanning", profile, "Looking for changes…")
         self.log = open(self.state_dir / (self.run_id + ".log"), "x", encoding="utf-8")
@@ -288,6 +317,18 @@ class Bridge:
     def track_progress(self, text, kind="stdout"):
         *lines, self.sync_text[kind] = (self.sync_text.get(kind, "") + text).split("\n")
         for line in lines:
+            failing = self.failing.pop(kind, None)
+            if failing is not None and line.strip() and not line.startswith(("[", "Failed", "Synchronization")):
+                failing["error"] = reason(failing["error"] + ": " + line)
+                continue
+            failed = FAILED.search(line)
+            item = self.find(failed.group(1)) if failed else None
+            if item:
+                item.update(failed=True, done=False, active=False, error=reason(failed.group(2)) or "Failed")
+                # The reason often continues on the next line.
+                if failed.group(2).rstrip().endswith(":"):
+                    self.failing[kind] = item
+                continue
             # A line can hold both: "…ETA[END] Copying a" after "[BGN] Copying a from …".
             begun, done = BEGIN.search(line), END.search(line)
             # "<path> from <root>": either may contain " from ", so match known paths.
@@ -545,14 +586,15 @@ class Bridge:
         elif code == 1:
             phase, message = "partial", "Finished with skipped or partially transferred items. Review the log."
         else:
-            phase, message = "error", f"Unison exited with code {code}. See the session log."
+            detail = fatal(self.tail)
+            phase, message = "error", detail or f"Unison exited with code {code}. See the session log."
         if result and self.committed and not self.cancelled:
             message = f"Synced {result['transferred']} item{'s' if result['transferred'] != 1 else ''}"
             message += f", {result['skipped']} held" if result["skipped"] else ""
             message += f", {result['failed']} failed." if result["failed"] else "."
         if self.committed and code == 0 and not self.cancelled:
             for item in self.state["items"]:
-                if "?" not in item["arrow"] and item["arrow"] != "error":
+                if "?" not in item["arrow"] and item["arrow"] != "error" and not item.get("failed"):
                     item["done"] = True
         record = {"id": self.run_id, "profile": self.state["profile"], "started": self.started,
                   "finished": time.time(), "phase": phase, "committed": self.committed, "result": result,

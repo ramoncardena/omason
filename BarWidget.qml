@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell.Io
+import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -47,7 +48,9 @@ BarWidget {
                     selectedProfile = recent ? recent.profile : (profiles.length ? profiles[0].name : "")
                 }
             } else if (data.type === "state") {
+                const before = session.phase
                 session = data
+                if (["scanning", "syncing", "cancelling", "review", "ready", "warning"].indexOf(before) >= 0) notifyIfClosed(data)
             } else if (data.type === "created") {
                 selectedProfile = data.profile
                 if (panelLoader.item) panelLoader.item.creating = false
@@ -114,6 +117,22 @@ BarWidget {
 
     implicitWidth: button.implicitWidth
     implicitHeight: button.implicitHeight
+
+    // Only the instance that ran the session sees it finish, so this fires once
+    // even with one widget per monitor. Clicking the notification opens the panel.
+    function notifyIfClosed(s) {
+        if (opened || ["complete", "partial", "error"].indexOf(s.phase) < 0) return
+        const result = s.result
+        let title = "omaSon · " + s.profile
+        let body = s.message
+        let urgency = "normal"
+        let glyph = Model.glyph.check
+        if (s.phase === "error") { urgency = "critical"; glyph = Model.glyph.error; title += (result ? " · sync incomplete" : " · Unison could not finish") }
+        else if (s.phase === "partial") glyph = Model.glyph.conflict
+        else if (!s.items.length) body = "Already in sync."
+        Util.execArgv(["omarchy-notification-send", "--app-name", "omaSon", "-g", glyph, "-u", urgency, title, body,
+                       "--exec", "omarchy-shell", "shell", "summon", root.moduleName, "{}"])
+    }
 
     function statusText() {
         const s = root.session

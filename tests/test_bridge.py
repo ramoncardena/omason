@@ -346,6 +346,27 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("+++ ", details)
         self.assertIn("line 00000", details)
 
+    def test_missing_root_and_failed_file_are_explained(self):
+        missing = self.config / "missing.prf"
+        missing.write_text(f"root = {self.left}\nroot = {self.root}/not-mounted/Backup\n")
+        self.bridge.start("missing")
+        self.wait({"error"})
+        self.assertIn("not-mounted/Backup is not available", self.bridge.state["message"])
+        (self.left / "locked").mkdir()
+        (self.left / "locked" / "a.txt").write_text("a")
+        self.scan()
+        self.apply()
+        (self.left / "locked" / "b.txt").write_text("b")
+        (self.left / "fine.txt").write_text("fine")
+        os.chmod(self.right / "locked", 0o555)
+        self.addCleanup(os.chmod, self.right / "locked", 0o755)
+        self.scan()
+        self.assertEqual(self.apply(), "error")
+        failed = self.bridge.find("locked/b.txt")
+        self.assertEqual((failed["failed"], failed["error"]), (True, "Permission denied"))
+        self.assertTrue(self.bridge.find("fine.txt")["done"])
+        self.assertEqual(self.bridge.state["result"]["failed"], 1)
+
     def test_catalog_replicas_and_last_run(self):
         (self.left / "one").write_text("one")
         self.scan()
@@ -360,6 +381,22 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(profile["last"]["phase"], "complete")
         self.assertEqual(profile["last"]["counts"]["toRight"], 1)
         self.assertEqual(catalog["history"][0]["result"]["transferred"], 1)
+
+
+class FailureTests(unittest.TestCase):
+    def test_failed_item_gets_its_reason(self):
+        bridge = module.Bridge(lambda _: None)
+        bridge.state["items"] = [{"path": "locked/b.txt", "arrow": "---->"}]
+        bridge.track_progress("Failed [locked/b.txt]: Error in copying locally:\n"
+                              "Permission denied [open(/r/locked/.unison.b.txt.2e5d.unison.tmp)]\n")
+        item = bridge.find("locked/b.txt")
+        self.assertEqual((item["failed"], item["done"], item["error"]), (True, False, "Permission denied"))
+
+    def test_fatal_errors_read_as_sentences(self):
+        text = "Error: Cannot find canonical name of /mnt/x/Backup: unable to cd either to it (/mnt/x/Backup: No such file or directory)\n"
+        self.assertEqual(module.fatal(text), "/mnt/x/Backup is not available (no such file or directory).")
+        self.assertEqual(module.fatal("Fatal error: Lost connection with the server\n"), "Lost connection with the server")
+        self.assertEqual(module.fatal("all fine\n"), "")
 
 
 class ProgressTests(unittest.TestCase):
