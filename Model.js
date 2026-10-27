@@ -288,6 +288,46 @@ function runSummary(record) {
   return record.message || ""
 }
 
+// Unison's `d` output: the echoed key, a `diff -u` command and headers with
+// long paths, the hunks, then "Exited with status N". Keep the hunks.
+function parseDiff(text) {
+  var all = String(text || "").split("\n")
+  // Which file is "-" and which is "+" varies with the change, so read the headers.
+  var oldPath = "", newPath = ""
+  for (var h = 0; h < all.length; h++) {
+    if (all[h].indexOf("--- ") === 0 && !oldPath) oldPath = all[h].slice(4).split("\t")[0]
+    else if (all[h].indexOf("+++ ") === 0 && !newPath) newPath = all[h].slice(4).split("\t")[0]
+  }
+  var start = -1
+  for (var i = 0; i < all.length; i++) if (all[i].indexOf("@@") === 0) { start = i; break }
+  if (start < 0) {
+    var rest = all.filter(function(l, n) { return !(n === 0 && l.trim().length <= 1) && l.indexOf("Exited with status") !== 0 })
+    return { unified: false, lines: rest.join("\n").trim() ? [{ text: rest.join("\n").trim(), kind: "context" }] : [] }
+  }
+  var lines = []
+  for (var j = start; j < all.length; j++) {
+    var line = all[j]
+    if (line.indexOf("Exited with status") === 0) break
+    var kind = line.indexOf("@@") === 0 ? "hunk" : (line.charAt(0) === "+" ? "add" : (line.charAt(0) === "-" ? "remove" : "context"))
+    lines.push({ text: line, kind: kind })
+  }
+  while (lines.length && !lines[lines.length - 1].text.trim()) lines.pop()
+  return { unified: true, lines: lines.slice(0, 400), oldPath: oldPath, newPath: newPath }
+}
+
+// Name the replica a diff header path belongs to, e.g. "+ Backup  − Documents".
+function diffLegend(diff, left, right) {
+  function side(path) {
+    if (left && left.root && path.indexOf(left.root) === 0) return left.name
+    if (right && right.root && path.indexOf(right.root) === 0) return right.name
+    return ""
+  }
+  var plus = side(diff.newPath), minus = side(diff.oldPath)
+  if (!plus && minus) plus = minus === left.name ? right.name : left.name
+  if (!minus && plus) minus = plus === left.name ? right.name : left.name
+  return plus ? "+ " + plus + "    − " + minus : ""
+}
+
 // Client-side preview of a root the user is typing into the new-profile form.
 function classify(root) {
   root = String(root || "").trim()

@@ -213,7 +213,7 @@ Panel {
         if (phase === "cancelled") return "Stopped"
         if (phase === "error") return "Unison failed"
         const changes = tally.total + (tally.total === 1 ? " change" : " changes")
-        return tally.unresolved ? changes + " · " + tally.unresolved + " need you" : changes
+        return tally.unresolved ? changes + " · " + tally.unresolved + (tally.unresolved === 1 ? " needs you" : " need you") : changes
     }
     function homeMeta() {
         if (!host.available) return "Unison is not installed"
@@ -580,10 +580,12 @@ Panel {
                                             fontFamily: root.family
                                         }
                                         PanelSectionHeader {
-                                            visible: entryBox.modelData.header && entryBox.modelData.pending > 0
-                                            text: visible ? entryBox.modelData.pending + " OPEN" : ""
-                                            foreground: root.urgent
-                                            color: root.urgent
+                                            // Only the attention group tracks decisions: "1 OPEN" once some are made, "DECIDED" when all are.
+                                            readonly property var entry: entryBox.modelData
+                                            visible: entry.header && entry.key === "attention" && entry.pending < entry.count
+                                            text: !visible ? "" : (entry.pending ? entry.pending + " OPEN" : "DECIDED")
+                                            foreground: entry.pending ? root.urgent : root.accent
+                                            color: entry.pending ? root.urgent : root.accent
                                             fontFamily: root.family
                                         }
                                     }
@@ -1088,6 +1090,7 @@ Panel {
 
             // Expanded: both sides in words, direction choice, and the diff.
             Column {
+                id: detailBox
                 visible: change.open
                 width: parent.width
                 leftPadding: Style.space(26)
@@ -1102,7 +1105,7 @@ Panel {
                     ] : []
                     Text {
                         required property var modelData
-                        width: parent.width - Style.space(26)
+                        width: detailBox.width - detailBox.leftPadding
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
                         text: modelData.name + "  " + modelData.text
@@ -1138,16 +1141,38 @@ Panel {
                         onClicked: if (change.item) root.setDirection(change.item, "default")
                     }
                 }
-                Text {
-                    visible: change.open && root.sessionState.detailsPath === change.item.path && root.sessionState.details !== ""
-                    width: parent.width - Style.space(26)
-                    textFormat: Text.PlainText
-                    wrapMode: Text.WrapAnywhere
-                    text: visible ? root.sessionState.details.slice(-6000) : ""
-                    color: root.foreground
-                    opacity: 0.85
-                    font.family: root.family
-                    font.pixelSize: Style.font.caption
+                // Unison's diff, trimmed to its hunks, with a legend naming each side.
+                Column {
+                    id: diffView
+                    readonly property var diff: change.open && root.sessionState.detailsPath === change.item.path
+                        ? Model.parseDiff(root.sessionState.details) : null
+                    visible: diff !== null && diff.lines.length > 0
+                    width: detailBox.width - detailBox.leftPadding
+                    spacing: 0
+                    Text {
+                        visible: text !== ""
+                        bottomPadding: Style.space(4)
+                        textFormat: Text.PlainText
+                        text: diffView.diff && diffView.diff.unified ? Model.diffLegend(diffView.diff, root.leftReplica, root.rightReplica) : ""
+                        color: root.dim
+                        font.family: root.family
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                    }
+                    Repeater {
+                        model: diffView.diff ? diffView.diff.lines : []
+                        Text {
+                            required property var modelData
+                            width: diffView.width
+                            textFormat: Text.PlainText
+                            wrapMode: Text.WrapAnywhere
+                            text: modelData.text
+                            color: modelData.kind === "add" ? root.accent : (modelData.kind === "remove" ? root.urgent : (modelData.kind === "hunk" ? root.dim : root.foreground))
+                            opacity: modelData.kind === "context" ? 0.75 : 1
+                            font.family: root.family
+                            font.pixelSize: Style.font.caption
+                        }
+                    }
                 }
             }
         }
