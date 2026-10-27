@@ -196,20 +196,50 @@ function profileGroups(profiles) {
   }
   var entries = [], rows = []
   for (var g = 0; g < groups.length; g++) {
+    var members = groups[g].profiles
+    var prefix = sharedPrefix(members.map(function(p) { return p.label }))
     entries.push({ header: true, group: groups[g] })
-    for (var r = 0; r < groups[g].profiles.length; r++) {
-      entries.push({ header: false, profile: groups[g].profiles[r], index: rows.length })
-      rows.push(groups[g].profiles[r])
+    for (var r = 0; r < members.length; r++) {
+      entries.push({ header: false, profile: members[r], index: rows.length, name: members[r].label.slice(prefix.length) })
+      rows.push(members[r])
     }
   }
   return { entries: entries, rows: rows }
 }
 
-function profileScope(profile) {
+// "gator-" in gator-backups, gator-desktop…: only cut at a separator, and only
+// when at least two profiles share it and something is left of every name.
+function sharedPrefix(labels) {
+  if (labels.length < 2) return ""
+  var prefix = labels[0]
+  for (var i = 1; i < labels.length; i++)
+    while (labels[i].indexOf(prefix) !== 0) prefix = prefix.slice(0, -1)
+  var cut = Math.max(prefix.lastIndexOf("-"), prefix.lastIndexOf("_"), prefix.lastIndexOf(" "), prefix.lastIndexOf("."))
+  prefix = cut >= 0 ? prefix.slice(0, cut + 1) : ""
+  return labels.every(function(l) { return l.length > prefix.length }) ? prefix : ""
+}
+
+// Runs worth remembering: anything that synced or failed. Scans that found
+// nothing and reviews that were cancelled are left out, and repeats merge.
+function recentRuns(history, limit) {
+  var result = []
+  for (var i = 0; i < (history || []).length && result.length < limit; i++) {
+    var run = history[i]
+    if (!run.committed && run.phase !== "error" && run.phase !== "partial") continue
+    var previous = result[result.length - 1]
+    if (previous && previous.profile === run.profile && runSummary(previous) === runSummary(run)) continue
+    result.push(run)
+  }
+  return result
+}
+
+// What the profile covers, minus anything its (shortened) name already says.
+function profileScope(profile, name) {
   if (!profile) return ""
-  var text = profile.paths && profile.paths.length ? profile.paths.join(" · ") : "Entire replica"
-  if (profile.ignores) text += "  ·  " + profile.ignores + (profile.ignores === 1 ? " ignore rule" : " ignore rules")
-  return text
+  var paths = (profile.paths || []).filter(function(p) { return p.toLowerCase() !== String(name || "").toLowerCase() })
+  var parts = paths.length ? [paths.join(" · ")] : (profile.paths && profile.paths.length ? [] : ["Entire replica"])
+  if (profile.ignores) parts.push(profile.ignores + (profile.ignores === 1 ? " ignore rule" : " ignore rules"))
+  return parts.join("  ·  ")
 }
 
 function offlineReplica(profile) {

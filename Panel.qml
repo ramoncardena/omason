@@ -51,7 +51,7 @@ Panel {
         && (phase === "review" || phase === "ready" || phase === "scanning")
     readonly property bool canSync: editable && tally.toRight + tally.toLeft > 0 && tally.merges === 0
     readonly property bool syncRowVisible: view === "session" && sessionState.items.length > 0 && phase !== "warning"
-    readonly property var recent: host.history.slice(0, 6)
+    readonly property var recent: Model.recentRuns(host.history, 3)
     readonly property var homeList: Model.profileGroups(host.profiles)
     readonly property int targetCount: view === "home" ? homeList.rows.length + 1 + recent.length
         : (view === "session" ? plan.rows.length + (syncRowVisible ? 1 : 0) : (view === "record" ? plan.rows.length : 0))
@@ -200,9 +200,19 @@ Panel {
     }
     function homeMeta() {
         if (!host.available) return "Unison is not installed"
-        const count = host.profiles.length
+        const profiles = host.profiles
+        const count = profiles.length + (profiles.length === 1 ? " profile" : " profiles")
+        const offline = []
+        profiles.forEach(function(p) {
+            const r = Model.offlineReplica(p)
+            if (r && offline.indexOf(r.name) < 0) offline.push(r.name)
+        })
+        if (offline.length) return offline.join(", ") + " not connected"
+        const failed = profiles.filter(function(p) { return p.last && (p.last.phase === "error" || p.last.phase === "partial") }).length
+        if (failed) return count + " · " + failed + (failed === 1 ? " needs attention" : " need attention")
         const last = host.history.find(function(r) { return r.committed })
-        return count + (count === 1 ? " profile" : " profiles") + (last ? " · last sync " + Model.relativeTime(last.finished, now) : "")
+        if (last) return count + " · last sync " + Model.relativeTime(last.finished, now)
+        return count + " · never synced"
     }
     function syncLabel() {
         if (phase === "syncing") return "Syncing " + (sessionState.progress ? sessionState.progress.done + " of " + sessionState.progress.total : "") + "…"
@@ -371,6 +381,7 @@ Panel {
                                     ProfileRow {
                                         visible: !homeEntry.modelData.header
                                         width: parent.width
+                                        name: homeEntry.modelData.header ? "" : homeEntry.modelData.name
                                         profile: homeEntry.modelData.header ? null : homeEntry.modelData.profile
                                         rowIndex: homeEntry.modelData.header ? -1 : homeEntry.modelData.index
                                     }
@@ -720,13 +731,14 @@ Panel {
     component ProfileRow: ListRow {
         id: profileRow
         property var profile: null
+        property string name: ""
         readonly property var offline: Model.offlineReplica(profile)
         readonly property var last: profile ? profile.last : null
 
         glyphText: Model.glyph.folder
         glyphColor: root.dim
-        title: profile ? profile.label : ""
-        caption: Model.profileScope(profile)
+        title: name || (profile ? profile.label : "")
+        caption: Model.profileScope(profile, name)
         trailing: last ? Model.relativeTime(last.finished, root.now) : "never synced"
         trailingGlyph: last ? Model.statusGlyph(last.phase) : ""
         trailingColor: last && (last.phase === "error" || last.phase === "partial") ? root.urgent : (last && last.phase === "complete" ? root.accent : root.dim)
