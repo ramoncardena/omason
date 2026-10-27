@@ -124,7 +124,7 @@ Panel {
     }
     // Diff is a toggle; Unison is asked again only when its output isn't for this row.
     function inspect(item) {
-        if (!item || item.arrow === "error") return
+        if (!Model.diffable(item)) return
         if (diffPath === item.path) { diffPath = ""; return }
         expandedPath = item.path
         diffPath = item.path
@@ -133,14 +133,18 @@ Panel {
     }
     // Full diff in the overlay; loads it first if this row's diff isn't the loaded one.
     function openFullDiff(item) {
-        if (!item || item.arrow === "error") return
+        if (!Model.diffable(item)) return
         viewerPath = item.path
         if (sessionState.detailsPath === item.path && sessionState.details) { diffViewer.open(); return }
         expandedPath = item.path
         diffPath = item.path
         if (editable) send("inspect", { path: item.path })
     }
-    onSessionStateChanged: if (viewerPath && !diffViewer.opened && sessionState.detailsPath === viewerPath) diffViewer.open()
+    onSessionStateChanged: {
+        if (viewerPath && !diffViewer.opened && sessionState.detailsPath === viewerPath) diffViewer.open()
+        // A diff that just arrived grows the open row: keep it in view.
+        if (diffPath && diffPath === expandedPath && sessionState.detailsPath === diffPath) scrollToCursor()
+    }
     function logPath() {
         if (view === "record") return record.logPath || ""
         return sessionState.run && host.stateDirectory ? host.stateDirectory + "/" + sessionState.run + ".log" : ""
@@ -153,7 +157,10 @@ Panel {
         close()
         Qt.openUrlExternally("file://" + path)
     }
-    function toggleExpand(item) { expandedPath = expandedPath === item.path ? "" : item.path }
+    function toggleExpand(item) {
+        expandedPath = expandedPath === item.path ? "" : item.path
+        if (expandedPath) scrollToCursor()
+    }
     function sync() { if (canSync) send("apply") }
     function stop() { if (host.busy && phase !== "cancelling") send("cancel") }
     // Unison is held open from scan to confirmation, but until a sync starts
@@ -230,8 +237,6 @@ Panel {
                 item = cursor === 0 ? profilePicker : (cursor === 1 ? scanButton : recentRepeater.itemAt(cursor - 2))
             } else if (cursor < plan.rows.length) {
                 item = planRepeater.itemAt(plan.rowEntry[cursor])
-            } else {
-                item = actionRow
             }
             if (!item) return
             const margin = Style.space(8)
@@ -239,7 +244,8 @@ Panel {
             const bottom = top + item.height
             const maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
             if (top < panelFlick.contentY + margin) panelFlick.contentY = Math.max(0, top - margin)
-            else if (bottom > panelFlick.contentY + panelFlick.height - margin) panelFlick.contentY = Math.min(maxY, bottom + margin - panelFlick.height)
+            else if (bottom > panelFlick.contentY + panelFlick.height - margin)
+                panelFlick.contentY = Math.min(maxY, Math.max(0, top - margin), bottom + margin - panelFlick.height)
         })
     }
 
@@ -327,7 +333,7 @@ Panel {
         open: root.opened
         focusTarget: keyCatcher
         contentWidth: panel.fittedContentWidth(Style.space(540))
-        contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(780))
+        contentHeight: panel.fittedContentHeight(stickyTop.implicitHeight + content.implicitHeight + stickyBottom.implicitHeight, Style.space(780))
 
         PanelKeyCatcher {
             id: keyCatcher
@@ -352,9 +358,96 @@ Panel {
                 item: root.viewerItem
             }
 
+            // Header and actions stay put; only the content between them scrolls.
+            Column {
+                id: stickyTop
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                spacing: Style.space(12)
+                bottomPadding: Style.space(12)
+
+            // ---- hero ----------------------------------------------
+            Item {
+                id: heroBox
+                width: parent.width
+                implicitHeight: hero.implicitHeight
+                // Reached from the hero's trailingControl, whose `root` is PanelHero.
+                readonly property string actionGlyph: root.view === "home" ? Model.glyph.added
+                    : (root.view !== "session" ? Model.glyph.back : (root.syncing ? Model.glyph.stop : Model.glyph.close))
+                readonly property string actionTip: root.view === "home" ? "New profile"
+                    : (root.view !== "session" ? "Back" : (root.syncing ? "Stop sync" : (root.host.busy ? "Cancel review · nothing is copied" : "Done")))
+                readonly property bool actionEnabled: root.view === "home" ? !root.host.busy && root.host.available
+                    : (root.view !== "session" || !root.host.busy || root.phase !== "cancelling")
+                function act() {
+                    if (root.view === "home") root.openCreate()
+                    else if (root.view === "session" && root.host.busy) root.stop()
+                    else root.back()
+                }
+
+                PanelHero {
+                    id: hero
+                    width: parent.width
+                    title: root.view === "home" ? "omaSon"
+                        : (root.view === "create" ? "New profile"
+                        : ((root.shownProfile ? root.shownProfile.label : (root.view === "record" ? root.record.profile : root.sessionState.profile)) || "omaSon"))
+                    meta: root.view === "home" ? root.homeMeta()
+                        : (root.view === "create" ? "Pair two replicas"
+                        : (root.view === "record" ? Model.runSummary(root.record) + " · " + Qt.formatDateTime(new Date(root.record.started * 1000), "dd MMM HH:mm") : root.sessionMeta()))
+                    foreground: root.foreground
+                    fontFamily: root.family
+                    iconComponent: Component {
+                        Text {
+                            id: heroIcon
+                            text: Model.glyph.sync
+                            color: root.phase === "error" && root.view === "session" ? root.urgent : root.foreground
+                            font.family: root.family
+                            font.pixelSize: Style.font.display
+                            RotationAnimation on rotation {
+                                running: root.view === "session" && (root.phase === "scanning" || root.syncing)
+                                from: 0; to: -360; duration: 1600; loops: Animation.Infinite
+                                onRunningChanged: if (!running) heroIcon.rotation = 0
+                            }
+                        }
+                    }
+                    trailingControl: Component {
+                        PanelActionButton {
+                            iconText: heroBox.actionGlyph
+                            tooltipText: heroBox.actionTip
+                            foreground: hero.foreground
+                            fontFamily: hero.fontFamily
+                            enabled: heroBox.actionEnabled
+                            onClicked: heroBox.act()
+                        }
+                    }
+                }
+            }
+
+            Text {
+                visible: root.host.errorMessage !== "" || !root.host.available
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: !root.host.available ? "Unison is not installed. Install the unison package to begin." : root.host.errorMessage
+                color: root.urgent
+                font.family: root.family
+                font.pixelSize: Style.font.bodySmall
+            }
+
+            BridgeCard {
+                visible: root.view === "session" || root.view === "record"
+                width: parent.width
+                leftSide: root.leftReplica
+                rightSide: root.rightReplica
+            }
+            }
+
             Flickable {
                 id: panelFlick
-                anchors.fill: parent
+                anchors.top: stickyTop.bottom
+                anchors.bottom: stickyBottom.top
+                anchors.left: parent.left
+                anchors.right: parent.right
                 contentWidth: width
                 contentHeight: content.implicitHeight
                 clip: true
@@ -367,73 +460,6 @@ Panel {
                     id: content
                     width: panelFlick.width
                     spacing: Style.space(12)
-
-                    // ---- hero ----------------------------------------------
-                    Item {
-                        id: heroBox
-                        width: parent.width
-                        implicitHeight: hero.implicitHeight
-                        // Reached from the hero's trailingControl, whose `root` is PanelHero.
-                        readonly property string actionGlyph: root.view === "home" ? Model.glyph.added
-                            : (root.view !== "session" ? Model.glyph.back : (root.syncing ? Model.glyph.stop : Model.glyph.close))
-                        readonly property string actionTip: root.view === "home" ? "New profile"
-                            : (root.view !== "session" ? "Back" : (root.syncing ? "Stop sync" : (root.host.busy ? "Cancel review · nothing is copied" : "Done")))
-                        readonly property bool actionEnabled: root.view === "home" ? !root.host.busy && root.host.available
-                            : (root.view !== "session" || !root.host.busy || root.phase !== "cancelling")
-                        function act() {
-                            if (root.view === "home") root.openCreate()
-                            else if (root.view === "session" && root.host.busy) root.stop()
-                            else root.back()
-                        }
-
-                        PanelHero {
-                            id: hero
-                            width: parent.width
-                            title: root.view === "home" ? "omaSon"
-                                : (root.view === "create" ? "New profile"
-                                : ((root.shownProfile ? root.shownProfile.label : (root.view === "record" ? root.record.profile : root.sessionState.profile)) || "omaSon"))
-                            meta: root.view === "home" ? root.homeMeta()
-                                : (root.view === "create" ? "Pair two replicas"
-                                : (root.view === "record" ? Model.runSummary(root.record) + " · " + Qt.formatDateTime(new Date(root.record.started * 1000), "dd MMM HH:mm") : root.sessionMeta()))
-                            foreground: root.foreground
-                            fontFamily: root.family
-                            iconComponent: Component {
-                                Text {
-                                    id: heroIcon
-                                    text: Model.glyph.sync
-                                    color: root.phase === "error" && root.view === "session" ? root.urgent : root.foreground
-                                    font.family: root.family
-                                    font.pixelSize: Style.font.display
-                                    RotationAnimation on rotation {
-                                        running: root.view === "session" && (root.phase === "scanning" || root.syncing)
-                                        from: 0; to: -360; duration: 1600; loops: Animation.Infinite
-                                        onRunningChanged: if (!running) heroIcon.rotation = 0
-                                    }
-                                }
-                            }
-                            trailingControl: Component {
-                                PanelActionButton {
-                                    iconText: heroBox.actionGlyph
-                                    tooltipText: heroBox.actionTip
-                                    foreground: hero.foreground
-                                    fontFamily: hero.fontFamily
-                                    enabled: heroBox.actionEnabled
-                                    onClicked: heroBox.act()
-                                }
-                            }
-                        }
-                    }
-
-                    Text {
-                        visible: root.host.errorMessage !== "" || !root.host.available
-                        width: parent.width
-                        textFormat: Text.PlainText
-                        wrapMode: Text.WordWrap
-                        text: !root.host.available ? "Unison is not installed. Install the unison package to begin." : root.host.errorMessage
-                        color: root.urgent
-                        font.family: root.family
-                        font.pixelSize: Style.font.bodySmall
-                    }
 
                     // ---- home ----------------------------------------------
                     Column {
@@ -580,12 +606,6 @@ Panel {
                         width: parent.width
                         spacing: Style.space(12)
 
-                        BridgeCard {
-                            width: parent.width
-                            leftSide: root.leftReplica
-                            rightSide: root.rightReplica
-                        }
-
                         WarningCard { visible: root.view === "session" && root.phase === "warning"; width: parent.width }
 
                         // Empty and in-between states.
@@ -667,88 +687,118 @@ Panel {
                             }
                         }
 
-                        // Progress through propagation.
-                        Item {
-                            visible: root.view === "session" && root.syncing
-                            width: parent.width
-                            height: Style.space(4)
-                            Rectangle { anchors.fill: parent; radius: height / 2; color: root.foreground; opacity: 0.12 }
-                            Rectangle {
-                                width: parent.width * Math.min(1, (root.sessionState.progress ? root.sessionState.progress.percent : 0) / 100)
-                                height: parent.height
-                                radius: height / 2
-                                color: root.accent
-                                Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
-                            }
-                        }
-
-                        Row {
-                            id: actionRow
-                            visible: root.view === "session" && (root.syncRowVisible || root.finished)
-                            width: parent.width
-                            spacing: Style.space(8)
-                            readonly property bool primaryHasCursor: root.cursorActive && root.cursor === root.plan.rows.length && root.syncRowVisible
-                            Button {
-                                width: (parent.width - parent.spacing) / 2
-                                text: root.finished ? "Scan again" : root.syncLabel()
-                                bordered: true
-                                selected: !root.finished && root.canSync
-                                // The one action that changes files: drawn in the accent colour.
-                                foreground: !root.finished && root.canSync ? root.accent : root.foreground
-                                hasCursor: actionRow.primaryHasCursor
-                                fontFamily: root.family
-                                enabled: root.finished || root.canSync
-                                opacity: enabled ? 1 : 0.55
-                                onHovered: function(isHovered) { if (isHovered && root.syncRowVisible) root.setCursor(root.plan.rows.length) }
-                                Rectangle {
-                                    visible: !root.finished && root.canSync
-                                    anchors.fill: parent
-                                    z: -1
-                                    radius: Style.cornerRadius
-                                    color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
-                                    border.width: 1
-                                    border.color: root.accent
-                                }
-                                onClicked: {
-                                    if (!root.finished) { root.sync(); return }
-                                    const name = root.sessionState.profile
-                                    root.done()
-                                    root.startScan(name)
-                                }
-                            }
-                            Button {
-                                width: (parent.width - parent.spacing) / 2
-                                text: root.finished ? "Done" : root.stopLabel()
-                                bordered: true
-                                fontFamily: root.family
-                                enabled: root.finished || root.phase !== "cancelling"
-                                opacity: enabled ? 1 : 0.55
-                                onClicked: root.finished ? root.done() : root.stop()
-                            }
-                        }
-
-                        Button {
-                            visible: root.view === "session" && root.sessionState.tail !== ""
-                            width: parent.width
-                            text: "Show Unison output"
-                            fontFamily: root.family
-                            fontSize: Style.font.bodySmall
-                            onClicked: root.showLog = true
-                        }
-                    }
-
-                    Text {
-                        width: parent.width
-                        horizontalAlignment: Text.AlignHCenter
-                        textFormat: Text.PlainText
-                        text: root.hint()
-                        color: root.dim
-                        opacity: 0.8
-                        font.family: root.family
-                        font.pixelSize: Style.font.caption
-                        elide: Text.ElideRight
                     }
                 }
+            }
+
+            // Hairlines where the list continues out of view.
+            Rectangle {
+                visible: panelFlick.contentY > 1
+                anchors.top: panelFlick.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                height: 1
+                color: root.foreground
+                opacity: 0.18
+            }
+            Rectangle {
+                visible: panelFlick.contentY < panelFlick.contentHeight - panelFlick.height - 1
+                anchors.bottom: panelFlick.bottom
+                anchors.left: parent.left
+                anchors.right: parent.right
+                height: 1
+                color: root.foreground
+                opacity: 0.18
+            }
+
+            Column {
+                id: stickyBottom
+                anchors.bottom: parent.bottom
+                anchors.left: parent.left
+                anchors.right: parent.right
+                spacing: Style.space(12)
+                topPadding: Style.space(12)
+
+            // Progress through propagation.
+            Item {
+                visible: root.view === "session" && root.syncing
+                width: parent.width
+                height: Style.space(4)
+                Rectangle { anchors.fill: parent; radius: height / 2; color: root.foreground; opacity: 0.12 }
+                Rectangle {
+                    width: parent.width * Math.min(1, (root.sessionState.progress ? root.sessionState.progress.percent : 0) / 100)
+                    height: parent.height
+                    radius: height / 2
+                    color: root.accent
+                    Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+                }
+            }
+
+            Row {
+                id: actionRow
+                visible: root.view === "session" && (root.syncRowVisible || root.finished)
+                width: parent.width
+                spacing: Style.space(8)
+                readonly property bool primaryHasCursor: root.cursorActive && root.cursor === root.plan.rows.length && root.syncRowVisible
+                Button {
+                    width: (parent.width - parent.spacing) / 2
+                    text: root.finished ? "Scan again" : root.syncLabel()
+                    bordered: true
+                    selected: !root.finished && root.canSync
+                    // The one action that changes files: drawn in the accent colour.
+                    foreground: !root.finished && root.canSync ? root.accent : root.foreground
+                    hasCursor: actionRow.primaryHasCursor
+                    fontFamily: root.family
+                    enabled: root.finished || root.canSync
+                    opacity: enabled ? 1 : 0.55
+                    onHovered: function(isHovered) { if (isHovered && root.syncRowVisible) root.setCursor(root.plan.rows.length) }
+                    Rectangle {
+                        visible: !root.finished && root.canSync
+                        anchors.fill: parent
+                        z: -1
+                        radius: Style.cornerRadius
+                        color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+                        border.width: 1
+                        border.color: root.accent
+                    }
+                    onClicked: {
+                        if (!root.finished) { root.sync(); return }
+                        const name = root.sessionState.profile
+                        root.done()
+                        root.startScan(name)
+                    }
+                }
+                Button {
+                    width: (parent.width - parent.spacing) / 2
+                    text: root.finished ? "Done" : root.stopLabel()
+                    bordered: true
+                    fontFamily: root.family
+                    enabled: root.finished || root.phase !== "cancelling"
+                    opacity: enabled ? 1 : 0.55
+                    onClicked: root.finished ? root.done() : root.stop()
+                }
+            }
+
+            Button {
+                visible: root.view === "session" && root.sessionState.tail !== ""
+                width: parent.width
+                text: "Show Unison output"
+                fontFamily: root.family
+                fontSize: Style.font.bodySmall
+                onClicked: root.showLog = true
+            }
+
+            Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                textFormat: Text.PlainText
+                text: root.hint()
+                color: root.dim
+                opacity: 0.8
+                font.family: root.family
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+            }
             }
         }
     }
@@ -1589,6 +1639,7 @@ Panel {
                     visible: !change.readOnly && change.dir !== "error"
                     spacing: Style.space(8)
                     Button {
+                        visible: Model.diffable(change.item)
                         text: change.item && root.diffPath === change.item.path ? "Hide diff" : "Diff"
                         selected: change.item !== null && root.diffPath === change.item.path
                         bordered: true

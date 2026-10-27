@@ -125,6 +125,16 @@ function kindGlyph(item) {
   return glyph.file
 }
 
+// A diff needs a file on both sides; new, deleted and folder changes have none.
+function diffable(item) {
+  if (!item || item.arrow === "error") return false
+  if (String(item.left).indexOf("dir") >= 0 || String(item.right).indexOf("dir") >= 0) return false
+  var sides = [item.leftInfo, item.rightInfo]
+  for (var i = 0; i < sides.length; i++)
+    if (sides[i] && (sides[i].state === "absent" || sides[i].state.indexOf("deleted") === 0)) return false
+  return true
+}
+
 function splitPath(path) {
   path = String(path || "")
   var cut = path.lastIndexOf("/")
@@ -306,7 +316,10 @@ function parseDiff(text) {
                  added: 0, removed: 0, hunks: [], lineCount: 0, truncated: false, message: "" }
   if (start < 0) {
     var rest = all.filter(function(l, n) { return !(n === 0 && l.trim().length <= 1) && l.indexOf("Exited with status") !== 0 })
-    result.message = rest.join("\n").trim()
+    // Unison echoes the key without a newline: "dCan't diff: …".
+    result.message = rest.join("\n").trim().replace(/^d(?=[A-Z])/, "")
+    if (/doesn't refer to a file in both replicas/.test(result.message))
+      result.message = "This exists on one side only, so there is nothing to compare."
     result.binary = /^Binary files .* differ$/m.test(result.message)
     return result
   }
