@@ -328,6 +328,17 @@ function diffLegend(diff, left, right) {
   return plus ? "+ " + plus + "    − " + minus : ""
 }
 
+// Unison's text UI output, minus the progress meter it redraws in place
+// ("  53%  1/4  (7 B of 9 B)  --:-- ETA"), which otherwise floods the log.
+function cleanLog(text) {
+  return String(text || "")
+    .replace(/ *\d+%\s+\d+\/\d+\s+\([^)]*\)[^\n\r\[]*?ETA */g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n").map(function(l) { return l.replace(/\s+$/, "") }).join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
 // Client-side preview of a root the user is typing into the new-profile form.
 function classify(root) {
   root = String(root || "").trim()

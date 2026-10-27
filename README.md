@@ -58,7 +58,9 @@ omarchy-shell shell summon io.github.ramoncardena.omason '{}'
    a change that way, `X` to hold it, and `U` to restore Unison's suggestion.
    Clicking the pill cycles through the three. A direction can propagate a
    deletion as well as copy a file. Enter expands a row to show both sides'
-   size and date and a direction picker. `D` loads Unison's diff.
+   size and date and a direction picker. `D` (or **Diff**) shows and hides
+   Unison's diff. **Show Unison output** (`V`) opens the raw output in a
+   scrollable overlay, with a button to open the full log file.
 4. **Sync N changes** (or `G`) applies exactly the directions shown. Held
    changes and untouched conflicts are left alone on both sides. Recommended
    merges must be given a direction or held first, because interactive merge
@@ -88,9 +90,9 @@ preference editor.
 | Enter | Scan · expand a change · press the focused button |
 | ← → / H L | Send the focused change to the left / right replica |
 | X / U | Hold the change / restore Unison's suggestion |
-| D | Show Unison's diff for the focused change |
+| D | Show or hide Unison's diff for the focused change |
 | G | Sync the shown directions |
-| C / V | Stop the session / toggle Unison's output |
+| C / V | Stop the session / show Unison's output |
 | N / R | New profile / scan (again) |
 | Backspace | Leave a finished session, record, or form |
 | Escape / Tab | Close popup / switch Omarchy panel |

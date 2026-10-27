@@ -30,6 +30,7 @@ Panel {
     property var record: null
     property string dismissedRun: ""
     property string expandedPath: ""
+    property string diffPath: ""
     property bool showLog: false
     property int cursor: 0
     property bool cursorActive: false
@@ -65,6 +66,8 @@ Panel {
         cursor = 0
         cursorActive = false
         expandedPath = ""
+        diffPath = ""
+        showLog = false
         if (panelFlick) panelFlick.contentY = 0
     }
     onTargetCountChanged: if (cursor >= targetCount) cursor = Math.max(0, targetCount - 1)
@@ -112,10 +115,26 @@ Panel {
         const d = Model.direction(item.arrow)
         setDirection(item, d === "right" ? "left" : (d === "left" ? "skip" : "right"))
     }
+    // Diff is a toggle; Unison is asked again only when its output isn't for this row.
     function inspect(item) {
-        if (!editable || !item || item.arrow === "error") return
+        if (!item || item.arrow === "error") return
+        if (diffPath === item.path) { diffPath = ""; return }
         expandedPath = item.path
-        send("inspect", { path: item.path })
+        diffPath = item.path
+        if ((sessionState.detailsPath !== item.path || !sessionState.details) && editable)
+            send("inspect", { path: item.path })
+    }
+    function logPath() {
+        if (view === "record") return record.logPath || ""
+        return sessionState.run && host.stateDirectory ? host.stateDirectory + "/" + sessionState.run + ".log" : ""
+    }
+    // The popup covers the panel, so close it first or the editor opens behind.
+    function openLogFile() {
+        const path = logPath()
+        if (!path) return
+        showLog = false
+        close()
+        Qt.openUrlExternally("file://" + path)
     }
     function toggleExpand(item) { expandedPath = expandedPath === item.path ? "" : item.path }
     function sync() { if (canSync) send("apply") }
@@ -289,13 +308,19 @@ Panel {
         PanelKeyCatcher {
             id: keyCatcher
             anchors.fill: parent
-            blocked: (root.creating && root.view === "create") || profilePicker.popupOpen
+            blocked: (root.creating && root.view === "create") || profilePicker.popupOpen || logPopup.opened
             onCloseRequested: root.close()
             onTabRequested: function(direction) { root.switchPanel(direction) }
             onMoveRequested: function(dx, dy) { root.move(dx, dy) }
             onActivateRequested: root.activate()
             onDeleteRequested: if (root.cursorActive && root.cursorRow()) root.setDirection(root.cursorRow(), "skip")
             onTextKey: function(text) { root.textKey(text) }
+
+            UnisonOutput {
+                id: logPopup
+                width: keyCatcher.width
+                height: keyCatcher.height
+            }
 
             Flickable {
                 id: panelFlick
@@ -675,20 +700,10 @@ Panel {
                         Button {
                             visible: root.view === "session" && root.sessionState.tail !== ""
                             width: parent.width
-                            text: root.showLog ? "Hide Unison output" : "Show Unison output"
+                            text: "Show Unison output"
                             fontFamily: root.family
                             fontSize: Style.font.bodySmall
-                            onClicked: root.showLog = !root.showLog
-                        }
-                        Text {
-                            visible: root.view === "session" && root.showLog
-                            width: parent.width
-                            textFormat: Text.PlainText
-                            wrapMode: Text.WrapAnywhere
-                            text: root.sessionState.tail.slice(-4000)
-                            color: root.dim
-                            font.family: root.family
-                            font.pixelSize: Style.font.caption
+                            onClicked: root.showLog = true
                         }
                     }
 
@@ -709,6 +724,153 @@ Panel {
     }
 
     // ---- components --------------------------------------------------------
+
+    // Unison's raw output over the panel, so the panel itself never scrolls
+    // through it. Follows new output while scrolled to the end.
+    component UnisonOutput: Controls.Popup {
+        id: output
+        property bool following: true
+        readonly property string text: Model.cleanLog(root.sessionState.tail)
+
+        x: 0
+        y: 0
+        padding: Style.space(14)
+        modal: true
+        dim: false
+        focus: true
+        closePolicy: Controls.Popup.CloseOnEscape | Controls.Popup.CloseOnPressOutside
+        onOpened: {
+            following = true
+            logText.forceActiveFocus()
+            Qt.callLater(scrollToEnd)
+        }
+        onClosed: {
+            root.showLog = false
+            keyCatcher.forceActiveFocus()
+        }
+        onTextChanged: if (opened && following) Qt.callLater(scrollToEnd)
+
+        function scrollToEnd() { logFlick.contentY = Math.max(0, logFlick.contentHeight - logFlick.height) }
+        function scrollBy(dy) {
+            logFlick.contentY = Math.max(0, Math.min(logFlick.contentHeight - logFlick.height, logFlick.contentY + dy))
+            following = logFlick.atYEnd
+        }
+
+        Connections {
+            target: root
+            function onShowLogChanged() { if (root.showLog) output.open(); else output.close() }
+        }
+
+        background: BorderSurface {
+            color: Commons.Color.popups.background
+            borderSpec: Border.localOrSurfaceSpec("popups", "border", Commons.Color.popups.border, Commons.Color.popups.border, Style.normalBorderWidth)
+            radius: Style.cornerRadius
+        }
+
+        contentItem: Column {
+            spacing: Style.space(10)
+
+            Item {
+                id: outputHeader
+                width: parent.width
+                implicitHeight: Math.max(outputTitle.implicitHeight, outputClose.implicitHeight)
+                Column {
+                    id: outputTitle
+                    anchors.left: parent.left
+                    anchors.right: outputClose.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(2)
+                    PanelSectionHeader { text: "UNISON OUTPUT"; foreground: root.foreground; fontFamily: root.family }
+                    Text {
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        text: "Latest output of this session · " + (root.logPath().split("/").pop() || "no log yet")
+                        color: root.dim
+                        font.family: root.family
+                        font.pixelSize: Style.font.caption
+                        elide: Text.ElideMiddle
+                    }
+                }
+                PanelActionButton {
+                    id: outputClose
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconText: Model.glyph.close
+                    tooltipText: "Close"
+                    foreground: root.foreground
+                    fontFamily: root.family
+                    onClicked: output.close()
+                }
+            }
+
+            Rectangle {
+                width: parent.width
+                height: Math.max(Style.space(80), output.availableHeight - outputHeader.height - outputButtons.height - parent.spacing * 2)
+                radius: Style.cornerRadius
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+
+                Flickable {
+                    id: logFlick
+                    anchors.fill: parent
+                    anchors.margins: Style.space(8)
+                    contentWidth: width
+                    contentHeight: logText.implicitHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    onMovementEnded: output.following = atYEnd
+                    Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+
+                    TextEdit {
+                        id: logText
+                        width: logFlick.width
+                        readOnly: true
+                        selectByMouse: true
+                        textFormat: TextEdit.PlainText
+                        wrapMode: TextEdit.WrapAnywhere
+                        text: output.text
+                        color: root.foreground
+                        selectionColor: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.35)
+                        font.family: root.family
+                        font.pixelSize: Style.font.caption
+                        Keys.onPressed: function(event) {
+                            const page = logFlick.height * 0.9
+                            if (event.key === Qt.Key_Down || event.text === "j") output.scrollBy(Style.space(40))
+                            else if (event.key === Qt.Key_Up || event.text === "k") output.scrollBy(-Style.space(40))
+                            else if (event.key === Qt.Key_PageDown || event.key === Qt.Key_Space) output.scrollBy(page)
+                            else if (event.key === Qt.Key_PageUp) output.scrollBy(-page)
+                            else if (event.key === Qt.Key_End || event.text === "G") { output.scrollToEnd(); output.following = true }
+                            else if (event.key === Qt.Key_Home || event.text === "g") output.scrollBy(-logFlick.contentHeight)
+                            else if (event.text === "v" || event.text === "q") output.close()
+                            else if (event.text === "o") root.openLogFile()
+                            else return
+                            event.accepted = true
+                        }
+                    }
+                }
+            }
+
+            Row {
+                id: outputButtons
+                width: parent.width
+                spacing: Style.space(8)
+                Button {
+                    width: (parent.width - parent.spacing) / 2
+                    text: "Open log file"
+                    bordered: true
+                    enabled: root.logPath() !== ""
+                    fontFamily: root.family
+                    onClicked: root.openLogFile()
+                }
+                Button {
+                    width: (parent.width - parent.spacing) / 2
+                    text: "Close"
+                    bordered: true
+                    fontFamily: root.family
+                    onClicked: output.close()
+                }
+            }
+        }
+    }
 
     component Caption: Text {
         width: parent ? parent.width : implicitWidth
@@ -1163,7 +1325,14 @@ Panel {
                 Row {
                     visible: !change.readOnly && change.dir !== "error"
                     spacing: Style.space(8)
-                    Button { text: "Diff"; bordered: true; fontFamily: root.family; fontSize: Style.font.bodySmall; onClicked: if (change.item) root.inspect(change.item) }
+                    Button {
+                        text: change.item && root.diffPath === change.item.path ? "Hide diff" : "Diff"
+                        selected: change.item !== null && root.diffPath === change.item.path
+                        bordered: true
+                        fontFamily: root.family
+                        fontSize: Style.font.bodySmall
+                        onClicked: if (change.item) root.inspect(change.item)
+                    }
                     Button {
                         visible: change.item !== null && Model.overridden(change.item)
                         text: "Reset to Unison's suggestion"
@@ -1173,10 +1342,19 @@ Panel {
                         onClicked: if (change.item) root.setDirection(change.item, "default")
                     }
                 }
+                Text {
+                    visible: change.open && root.diffPath === change.item.path && root.sessionState.detailsPath !== change.item.path
+                    textFormat: Text.PlainText
+                    text: root.editable ? "Loading diff…" : "Diff is available while reviewing."
+                    color: root.dim
+                    font.family: root.family
+                    font.pixelSize: Style.font.caption
+                }
                 // Unison's diff, trimmed to its hunks, with a legend naming each side.
                 Column {
                     id: diffView
-                    readonly property var diff: change.open && root.sessionState.detailsPath === change.item.path
+                    readonly property bool wanted: change.open && root.diffPath === change.item.path
+                    readonly property var diff: wanted && root.sessionState.detailsPath === change.item.path
                         ? Model.parseDiff(root.sessionState.details) : null
                     visible: diff !== null && diff.lines.length > 0
                     width: detailBox.width - detailBox.leftPadding
