@@ -289,30 +289,74 @@ function runSummary(record) {
 }
 
 // Unison's `d` output: the echoed key, a `diff -u` command and headers with
-// long paths, the hunks, then "Exited with status N". Keep the hunks.
+// long paths, the hunks, then "Exited with status N". Parse the hunks with
+// line numbers; anything else (e.g. "Binary files … differ") stays as text.
+var DIFF_LINE_LIMIT = 3000
+
 function parseDiff(text) {
   var all = String(text || "").split("\n")
   // Which file is "-" and which is "+" varies with the change, so read the headers.
-  var oldPath = "", newPath = ""
+  var oldPath = "", newPath = "", start = -1
   for (var h = 0; h < all.length; h++) {
     if (all[h].indexOf("--- ") === 0 && !oldPath) oldPath = all[h].slice(4).split("\t")[0]
     else if (all[h].indexOf("+++ ") === 0 && !newPath) newPath = all[h].slice(4).split("\t")[0]
+    else if (all[h].indexOf("@@") === 0) { start = h; break }
   }
-  var start = -1
-  for (var i = 0; i < all.length; i++) if (all[i].indexOf("@@") === 0) { start = i; break }
+  var result = { unified: start >= 0, binary: false, oldPath: oldPath, newPath: newPath,
+                 added: 0, removed: 0, hunks: [], lineCount: 0, truncated: false, message: "" }
   if (start < 0) {
     var rest = all.filter(function(l, n) { return !(n === 0 && l.trim().length <= 1) && l.indexOf("Exited with status") !== 0 })
-    return { unified: false, lines: rest.join("\n").trim() ? [{ text: rest.join("\n").trim(), kind: "context" }] : [] }
+    result.message = rest.join("\n").trim()
+    result.binary = /^Binary files .* differ$/m.test(result.message)
+    return result
   }
-  var lines = []
+  var hunk = null, oldNo = 0, newNo = 0
   for (var j = start; j < all.length; j++) {
     var line = all[j]
     if (line.indexOf("Exited with status") === 0) break
-    var kind = line.indexOf("@@") === 0 ? "hunk" : (line.charAt(0) === "+" ? "add" : (line.charAt(0) === "-" ? "remove" : "context"))
-    lines.push({ text: line, kind: kind })
+    var header = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/.exec(line)
+    if (header) {
+      oldNo = +header[1]; newNo = +header[3]
+      hunk = { oldStart: oldNo, newStart: newNo, newCount: header[4] === undefined ? 1 : +header[4], context: header[5], lines: [] }
+      result.hunks.push(hunk)
+      continue
+    }
+    if (!hunk) continue
+    if (result.lineCount >= DIFF_LINE_LIMIT) { result.truncated = true; break }
+    var kind = line.charAt(0) === "+" ? "add" : (line.charAt(0) === "-" ? "remove" : (line.charAt(0) === "\\" ? "meta" : "context"))
+    var entry = { kind: kind, text: kind === "meta" ? line : line.slice(1), number: 0 }
+    if (kind === "add") { entry.number = newNo++; result.added++ }
+    else if (kind === "remove") { entry.number = oldNo++; result.removed++ }
+    else if (kind === "context") { entry.number = newNo; oldNo++; newNo++ }
+    hunk.lines.push(entry)
+    result.lineCount++
   }
-  while (lines.length && !lines[lines.length - 1].text.trim()) lines.pop()
-  return { unified: true, lines: lines.slice(0, 400), oldPath: oldPath, newPath: newPath }
+  // Trailing blank context left by the "Exited with status" separator.
+  var last = result.hunks.length ? result.hunks[result.hunks.length - 1].lines : []
+  while (last.length && last[last.length - 1].kind === "context" && !last[last.length - 1].text.trim()) { last.pop(); result.lineCount-- }
+  return result
+}
+
+// The first few lines of a diff for the row: whole hunks while they fit.
+function diffPreview(diff, maxLines) {
+  var lines = []
+  for (var i = 0; i < diff.hunks.length && lines.length < maxLines; i++) {
+    lines.push({ kind: "hunk", text: hunkLabel(diff.hunks[i]), number: 0 })
+    var body = diff.hunks[i].lines
+    for (var j = 0; j < body.length && lines.length < maxLines; j++) lines.push(body[j])
+  }
+  return lines
+}
+
+function hunkLabel(hunk) {
+  var end = hunk.newStart + Math.max(0, hunk.newCount - 1)
+  var range = hunk.newCount > 1 ? "Lines " + hunk.newStart + "–" + end : "Line " + hunk.newStart
+  return hunk.context ? range + " · " + hunk.context.trim() : range
+}
+
+function diffStat(diff) {
+  var changes = diff.hunks.length + (diff.hunks.length === 1 ? " change" : " changes")
+  return "+" + diff.added + " −" + diff.removed + " · " + changes
 }
 
 // Name the replica a diff header path belongs to, e.g. "+ Backup  − Documents".

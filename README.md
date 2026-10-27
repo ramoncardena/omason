@@ -59,7 +59,11 @@ omarchy-shell shell summon io.github.ramoncardena.omason '{}'
    Clicking the pill cycles through the three. A direction can propagate a
    deletion as well as copy a file. Enter expands a row to show both sides'
    size and date and a direction picker. `D` (or **Diff**) shows and hides
-   Unison's diff. **Show Unison output** (`V`) opens the raw output in a
+   a short preview of Unison's diff: how many lines were added and removed,
+   which replica is which, and the first lines. **View full diff** (`F`)
+   opens the whole diff in an overlay with line numbers, one section per
+   change, and `N`/`P` to jump between changes. Binary files show their size
+   on each side. **Show Unison output** (`V`) opens the raw output in a
    scrollable overlay, with a button to open the full log file.
 4. **Sync N changes** (or `G`) applies exactly the directions shown. Held
    changes and untouched conflicts are left alone on both sides. Recommended
@@ -91,7 +95,7 @@ preference editor.
 | Enter | Scan · expand a change · press the focused button |
 | ← → / H L | Send the focused change to the left / right replica |
 | X / U | Hold the change / restore Unison's suggestion |
-| D | Show or hide Unison's diff for the focused change |
+| D / F | Show or hide the diff preview / open the full diff (N / P jump between changes) |
 | G | Sync the shown directions |
 | C / V | Cancel the review or stop the sync / show Unison's output |
 | N / R | New profile / scan (again) |
@@ -140,8 +144,8 @@ Profiles, Unison archives/backups, and omaSon history are retained on removal.
 ```
 
 `scripts/demo.sh` creates (or resets) a disposable `omason-demo` profile under
-`~/.cache/omason-demo` with a conflict, edits, a deletion, and new files on
-both sides. `--big` adds a 1 GB file to watch sync progress; `--remove`
+`~/.cache/omason-demo` with a conflict, edits (one with a long diff), a binary
+change, a deletion, and new files on both sides. `--big` adds a 1 GB file to watch sync progress; `--remove`
 deletes the demo folders, profile, and only the demo's Unison archives.
 
 The integration suite runs real Unison against disposable directories. It never

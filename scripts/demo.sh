@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Create or reset a disposable "omason-demo" profile with pending changes on
-# both sides: a conflict, edits, a deletion, new files and a new folder.
+# both sides: a conflict, edits (one with a long diff), a binary change, a
+# deletion, new files and a new folder.
 #
 #   scripts/demo.sh           reset the demo
 #   scripts/demo.sh --big     also add a 1 GB file, to watch sync progress
@@ -45,6 +46,7 @@ echo "cv" > "$left/cv-2026.pdf"
 echo "old" > "$left/old-draft.txt"
 head -c 48000 /dev/urandom > "$left/invoices/october.pdf"
 head -c 2100000 /dev/urandom > "$left/photos/2026/lisbon.jpg"
+for day in $(seq 1 320); do echo "Day $day: walked by the river, read a chapter, wrote notes about topic $((day % 37))."; done > "$left/notes/journal.md"
 cp -a -- "$left/." "$right/"
 printf '# omaSon demo profile (safe to delete: scripts/demo.sh --remove)\nroot = %s\nroot = %s\n' "$left" "$right" > "$profile"
 
@@ -60,6 +62,13 @@ rm -- "$left/old-draft.txt"
 mkdir -p -- "$left/recipes" && echo "pasta" > "$left/recipes/carbonara.md"
 head -c 830000 /dev/urandom > "$left/photos/2026/porto.jpg"
 head -c 52000 /dev/urandom > "$right/invoices/november.pdf"
+# A long diff (edits, insertions and deletions spread through the file) and a binary change.
+awk '{ if (NR % 23 == 0) print "Day " NR ": rewritten on the laptop, with a much longer entry than before."
+       else if (NR % 41 == 0) next
+       else print
+       if (NR % 64 == 0) { print "  - extra note added after day " NR; print "  - and another one" } }' \
+  "$left/notes/journal.md" > "$left/notes/journal.md.new" && mv -- "$left/notes/journal.md.new" "$left/notes/journal.md"
+head -c 120000 /dev/urandom >> "$right/photos/2026/lisbon.jpg"
 if [[ ${1:-} == --big ]]; then
   mkdir -p -- "$left/videos"
   head -c 1G /dev/urandom > "$left/videos/trip.mp4"

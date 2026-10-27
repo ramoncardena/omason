@@ -332,6 +332,20 @@ class IntegrationTests(unittest.TestCase):
         self.wait({"review"})
         self.assertIn("left side", self.bridge.state["details"])
 
+    def test_large_diff_keeps_its_start(self):
+        (self.left / "big.txt").write_text("".join(f"left line {i:05d} with some padding text\n" for i in range(6000)))
+        (self.right / "big.txt").write_text("".join(f"right line {i:05d} with some padding text\n" for i in range(6000)))
+        self.scan()
+        self.command("inspect", path="big.txt")
+        deadline = time.monotonic() + 15
+        while self.bridge.state["detailsPath"] != "big.txt" and time.monotonic() < deadline:
+            self.bridge.pump(0.01)
+        details = self.bridge.state["details"]
+        self.assertTrue(self.bridge.state["detailsTruncated"])
+        self.assertLessEqual(len(details), module.DETAILS_LIMIT)
+        self.assertIn("+++ ", details)
+        self.assertIn("line 00000", details)
+
     def test_catalog_replicas_and_last_run(self):
         (self.left / "one").write_text("one")
         self.scan()

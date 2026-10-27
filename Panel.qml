@@ -31,6 +31,9 @@ Panel {
     property string dismissedRun: ""
     property string expandedPath: ""
     property string diffPath: ""
+    property string viewerPath: ""
+    readonly property int previewLines: 8
+    readonly property var viewerItem: viewerPath ? sessionState.items.find(function(i) { return i.path === root.viewerPath }) || null : null
     property bool showLog: false
     property int cursor: 0
     property bool cursorActive: false
@@ -70,6 +73,7 @@ Panel {
         cursorActive = false
         expandedPath = ""
         diffPath = ""
+        viewerPath = ""
         showLog = false
         if (panelFlick) panelFlick.contentY = 0
     }
@@ -127,6 +131,16 @@ Panel {
         if ((sessionState.detailsPath !== item.path || !sessionState.details) && editable)
             send("inspect", { path: item.path })
     }
+    // Full diff in the overlay; loads it first if this row's diff isn't the loaded one.
+    function openFullDiff(item) {
+        if (!item || item.arrow === "error") return
+        viewerPath = item.path
+        if (sessionState.detailsPath === item.path && sessionState.details) { diffViewer.open(); return }
+        expandedPath = item.path
+        diffPath = item.path
+        if (editable) send("inspect", { path: item.path })
+    }
+    onSessionStateChanged: if (viewerPath && !diffViewer.opened && sessionState.detailsPath === viewerPath) diffViewer.open()
     function logPath() {
         if (view === "record") return record.logPath || ""
         return sessionState.run && host.stateDirectory ? host.stateDirectory + "/" + sessionState.run + ".log" : ""
@@ -204,6 +218,7 @@ Panel {
         else if (view === "session" && text === "r" && finished) { const name = sessionState.profile; done(); startScan(name) }
         else if (view === "session" && text === "u" && row) setDirection(row, "default")
         else if (view === "session" && text === "d" && row) inspect(row)
+        else if (view === "session" && text === "f" && row) openFullDiff(row)
         else if (view === "session" && text === "g") sync()
         else if (view === "session" && text === "c") stop()
         else if (view === "session" && text === "v") showLog = !showLog
@@ -286,7 +301,7 @@ Panel {
         if (finished) return "R scan again · ⏎ / ⌫ done · V output"
         if (syncing) return "C stop sync · V output"
         if (phase === "warning") return "C cancel · V output"
-        return "←→ direction · X hold · U reset · D diff · G sync · C cancel"
+        return "←→ direction · X hold · U reset · D diff · F full diff · G sync · C cancel"
     }
 
     Timer { id: focusDelay; interval: 120; onTriggered: if (root.creating) nameField.forceActiveFocus() }
@@ -317,7 +332,7 @@ Panel {
         PanelKeyCatcher {
             id: keyCatcher
             anchors.fill: parent
-            blocked: (root.creating && root.view === "create") || profilePicker.popupOpen || logPopup.opened
+            blocked: (root.creating && root.view === "create") || profilePicker.popupOpen || logPopup.opened || diffViewer.opened
             onCloseRequested: root.close()
             onTabRequested: function(direction) { root.switchPanel(direction) }
             onMoveRequested: function(dx, dy) { root.move(dx, dy) }
@@ -329,6 +344,12 @@ Panel {
                 id: logPopup
                 width: keyCatcher.width
                 height: keyCatcher.height
+            }
+            DiffViewer {
+                id: diffViewer
+                width: keyCatcher.width
+                height: keyCatcher.height
+                item: root.viewerItem
             }
 
             Flickable {
@@ -734,12 +755,14 @@ Panel {
 
     // ---- components --------------------------------------------------------
 
-    // Unison's raw output over the panel, so the panel itself never scrolls
-    // through it. Follows new output while scrolled to the end.
-    component UnisonOutput: Controls.Popup {
-        id: output
-        property bool following: true
-        readonly property string text: Model.cleanLog(root.sessionState.tail)
+    // Frame shared by the overlays: covers the panel content, title and close
+    // button on top, a tinted body, a row of buttons at the bottom.
+    component Overlay: Controls.Popup {
+        id: overlay
+        property string title: ""
+        property string subtitle: ""
+        default property alias body: overlayBody.data
+        property alias buttons: overlayButtons.data
 
         x: 0
         y: 0
@@ -748,15 +771,83 @@ Panel {
         dim: false
         focus: true
         closePolicy: Controls.Popup.CloseOnEscape | Controls.Popup.CloseOnPressOutside
+        onClosed: keyCatcher.forceActiveFocus()
+
+        background: BorderSurface {
+            color: Commons.Color.popups.background
+            borderSpec: Border.localOrSurfaceSpec("popups", "border", Commons.Color.popups.border, Commons.Color.popups.border, Style.normalBorderWidth)
+            radius: Style.cornerRadius
+        }
+
+        contentItem: Column {
+            spacing: Style.space(10)
+
+            Item {
+                id: overlayHeader
+                width: parent.width
+                implicitHeight: Math.max(overlayTitle.implicitHeight, overlayClose.implicitHeight)
+                Column {
+                    id: overlayTitle
+                    anchors.left: parent.left
+                    anchors.right: overlayClose.left
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(2)
+                    PanelSectionHeader { text: overlay.title; foreground: root.foreground; fontFamily: root.family }
+                    Text {
+                        width: parent.width
+                        visible: text !== ""
+                        textFormat: Text.PlainText
+                        text: overlay.subtitle
+                        color: root.dim
+                        font.family: root.family
+                        font.pixelSize: Style.font.caption
+                        elide: Text.ElideMiddle
+                    }
+                }
+                PanelActionButton {
+                    id: overlayClose
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconText: Model.glyph.close
+                    tooltipText: "Close"
+                    foreground: root.foreground
+                    fontFamily: root.family
+                    onClicked: overlay.close()
+                }
+            }
+
+            Rectangle {
+                id: overlayBody
+                width: parent.width
+                height: Math.max(Style.space(80), overlay.availableHeight - overlayHeader.height - overlayButtons.height - parent.spacing * 2)
+                radius: Style.cornerRadius
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+            }
+
+            Row {
+                id: overlayButtons
+                width: parent.width
+                spacing: Style.space(8)
+            }
+        }
+    }
+
+    // Unison's raw output over the panel, so the panel itself never scrolls
+    // through it. Follows new output while scrolled to the end.
+    component UnisonOutput: Overlay {
+        id: output
+        property bool following: true
+        readonly property string text: Model.cleanLog(root.sessionState.tail)
+
+        title: "UNISON OUTPUT"
+        subtitle: "Latest output of this session · " + (root.logPath().split("/").pop() || "no log yet")
         onOpened: {
             following = true
             logText.forceActiveFocus()
             Qt.callLater(scrollToEnd)
         }
-        onClosed: {
-            root.showLog = false
-            keyCatcher.forceActiveFocus()
-        }
+        onClosed: root.showLog = false
         onTextChanged: if (opened && following) Qt.callLater(scrollToEnd)
 
         function scrollToEnd() { logFlick.contentY = Math.max(0, logFlick.contentHeight - logFlick.height) }
@@ -770,113 +861,276 @@ Panel {
             function onShowLogChanged() { if (root.showLog) output.open(); else output.close() }
         }
 
-        background: BorderSurface {
-            color: Commons.Color.popups.background
-            borderSpec: Border.localOrSurfaceSpec("popups", "border", Commons.Color.popups.border, Commons.Color.popups.border, Style.normalBorderWidth)
-            radius: Style.cornerRadius
+        Flickable {
+            id: logFlick
+            anchors.fill: parent
+            anchors.margins: Style.space(8)
+            contentWidth: width
+            contentHeight: logText.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            onMovementEnded: output.following = atYEnd
+            Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+
+            TextEdit {
+                id: logText
+                width: logFlick.width
+                readOnly: true
+                selectByMouse: true
+                textFormat: TextEdit.PlainText
+                wrapMode: TextEdit.WrapAnywhere
+                text: output.text
+                color: root.foreground
+                selectionColor: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.35)
+                font.family: root.family
+                font.pixelSize: Style.font.caption
+                Keys.onPressed: function(event) {
+                    const page = logFlick.height * 0.9
+                    if (event.key === Qt.Key_Down || event.text === "j") output.scrollBy(Style.space(40))
+                    else if (event.key === Qt.Key_Up || event.text === "k") output.scrollBy(-Style.space(40))
+                    else if (event.key === Qt.Key_PageDown || event.key === Qt.Key_Space) output.scrollBy(page)
+                    else if (event.key === Qt.Key_PageUp) output.scrollBy(-page)
+                    else if (event.key === Qt.Key_End || event.text === "G") { output.scrollToEnd(); output.following = true }
+                    else if (event.key === Qt.Key_Home || event.text === "g") output.scrollBy(-logFlick.contentHeight)
+                    else if (event.text === "v" || event.text === "q") output.close()
+                    else if (event.text === "o") root.openLogFile()
+                    else return
+                    event.accepted = true
+                }
+            }
         }
 
-        contentItem: Column {
-            spacing: Style.space(10)
+        buttons: [
+            Button {
+                width: (output.availableWidth - Style.space(8)) / 2
+                text: "Open log file"
+                bordered: true
+                enabled: root.logPath() !== ""
+                fontFamily: root.family
+                onClicked: root.openLogFile()
+            },
+            Button {
+                width: (output.availableWidth - Style.space(8)) / 2
+                text: "Close"
+                bordered: true
+                fontFamily: root.family
+                onClicked: output.close()
+            }
+        ]
+    }
 
-            Item {
-                id: outputHeader
-                width: parent.width
-                implicitHeight: Math.max(outputTitle.implicitHeight, outputClose.implicitHeight)
-                Column {
-                    id: outputTitle
-                    anchors.left: parent.left
-                    anchors.right: outputClose.left
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: Style.space(2)
-                    PanelSectionHeader { text: "UNISON OUTPUT"; foreground: root.foreground; fontFamily: root.family }
-                    Text {
-                        width: parent.width
-                        textFormat: Text.PlainText
-                        text: "Latest output of this session · " + (root.logPath().split("/").pop() || "no log yet")
-                        color: root.dim
-                        font.family: root.family
-                        font.pixelSize: Style.font.caption
-                        elide: Text.ElideMiddle
-                    }
-                }
-                PanelActionButton {
-                    id: outputClose
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    iconText: Model.glyph.close
-                    tooltipText: "Close"
-                    foreground: root.foreground
-                    fontFamily: root.family
-                    onClicked: output.close()
+    // The whole diff of one change: a section per hunk with its line range,
+    // line numbers, tinted added/removed lines. N/P jump between hunks.
+    component DiffViewer: Overlay {
+        id: viewer
+        property var item: null
+        property int hunk: 0
+        readonly property var diff: item && root.sessionState.detailsPath === item.path ? Model.parseDiff(root.sessionState.details) : null
+        readonly property int hunkCount: diff ? diff.hunks.length : 0
+
+        title: "DIFF"
+        subtitle: !item ? "" : item.path + (diff && diff.unified ? "  ·  " + Model.diffStat(diff) + "  ·  " + Model.diffLegend(diff, root.leftReplica, root.rightReplica) : "")
+        onOpened: {
+            hunk = 0
+            diffFlick.contentY = 0
+            diffKeys.forceActiveFocus()
+        }
+        onClosed: root.viewerPath = ""
+
+        function jump(step) {
+            if (!hunkCount) return
+            hunk = Math.max(0, Math.min(hunkCount - 1, hunk + step))
+            const target = hunkRepeater.itemAt(hunk)
+            if (target) diffFlick.contentY = Math.max(0, Math.min(diffFlick.contentHeight - diffFlick.height, target.y))
+        }
+        function scrollBy(dy) { diffFlick.contentY = Math.max(0, Math.min(diffFlick.contentHeight - diffFlick.height, diffFlick.contentY + dy)) }
+
+        Flickable {
+            id: diffFlick
+            anchors.fill: parent
+            anchors.margins: Style.space(8)
+            contentWidth: width
+            contentHeight: diffColumn.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+            // Keep "change N of M" in step with manual scrolling.
+            onContentYChanged: {
+                for (let i = viewer.hunkCount - 1; i >= 0; i--) {
+                    const section = hunkRepeater.itemAt(i)
+                    if (section && section.y <= contentY + Style.space(12)) { viewer.hunk = i; return }
                 }
             }
 
-            Rectangle {
-                width: parent.width
-                height: Math.max(Style.space(80), output.availableHeight - outputHeader.height - outputButtons.height - parent.spacing * 2)
-                radius: Style.cornerRadius
-                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+            Item {
+                id: diffKeys
+                focus: true
+                Keys.onPressed: function(event) {
+                    const page = diffFlick.height * 0.9
+                    if (event.text === "n" || event.key === Qt.Key_Right || event.text === "l") viewer.jump(1)
+                    else if (event.text === "p" || event.key === Qt.Key_Left || event.text === "h") viewer.jump(-1)
+                    else if (event.key === Qt.Key_Down || event.text === "j") viewer.scrollBy(Style.space(40))
+                    else if (event.key === Qt.Key_Up || event.text === "k") viewer.scrollBy(-Style.space(40))
+                    else if (event.key === Qt.Key_PageDown || event.key === Qt.Key_Space) viewer.scrollBy(page)
+                    else if (event.key === Qt.Key_PageUp) viewer.scrollBy(-page)
+                    else if (event.key === Qt.Key_Home || event.text === "g") viewer.scrollBy(-diffFlick.contentHeight)
+                    else if (event.key === Qt.Key_End || event.text === "G") viewer.scrollBy(diffFlick.contentHeight)
+                    else if (event.text === "f" || event.text === "q" || event.text === "d") viewer.close()
+                    else return
+                    event.accepted = true
+                }
+            }
 
-                Flickable {
-                    id: logFlick
-                    anchors.fill: parent
-                    anchors.margins: Style.space(8)
-                    contentWidth: width
-                    contentHeight: logText.implicitHeight
-                    clip: true
-                    boundsBehavior: Flickable.StopAtBounds
-                    onMovementEnded: output.following = atYEnd
-                    Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+            Column {
+                id: diffColumn
+                width: diffFlick.width
+                spacing: Style.space(10)
 
-                    TextEdit {
-                        id: logText
-                        width: logFlick.width
-                        readOnly: true
-                        selectByMouse: true
-                        textFormat: TextEdit.PlainText
-                        wrapMode: TextEdit.WrapAnywhere
-                        text: output.text
-                        color: root.foreground
-                        selectionColor: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.35)
-                        font.family: root.family
-                        font.pixelSize: Style.font.caption
-                        Keys.onPressed: function(event) {
-                            const page = logFlick.height * 0.9
-                            if (event.key === Qt.Key_Down || event.text === "j") output.scrollBy(Style.space(40))
-                            else if (event.key === Qt.Key_Up || event.text === "k") output.scrollBy(-Style.space(40))
-                            else if (event.key === Qt.Key_PageDown || event.key === Qt.Key_Space) output.scrollBy(page)
-                            else if (event.key === Qt.Key_PageUp) output.scrollBy(-page)
-                            else if (event.key === Qt.Key_End || event.text === "G") { output.scrollToEnd(); output.following = true }
-                            else if (event.key === Qt.Key_Home || event.text === "g") output.scrollBy(-logFlick.contentHeight)
-                            else if (event.text === "v" || event.text === "q") output.close()
-                            else if (event.text === "o") root.openLogFile()
-                            else return
-                            event.accepted = true
+                Text {
+                    visible: !!viewer.diff && !viewer.diff.unified
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    text: viewer.diff ? (viewer.diff.message || "Unison shows no differences.") : "Loading diff…"
+                    color: root.dim
+                    font.family: root.family
+                    font.pixelSize: Style.font.caption
+                }
+                Repeater {
+                    id: hunkRepeater
+                    model: viewer.diff ? viewer.diff.hunks : []
+                    Column {
+                        id: section
+                        required property var modelData
+                        width: diffColumn.width
+                        DiffLine { width: section.width; line: ({ kind: "hunk", text: Model.hunkLabel(section.modelData), number: 0 }) }
+                        Repeater {
+                            model: section.modelData.lines
+                            DiffLine { required property var modelData; width: section.width; line: modelData }
                         }
                     }
                 }
+                Text {
+                    visible: !!viewer.diff && (viewer.diff.truncated || root.sessionState.detailsTruncated)
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    text: "Diff truncated. Open the log file from Unison output for the rest."
+                    color: root.urgent
+                    font.family: root.family
+                    font.pixelSize: Style.font.caption
+                }
             }
+        }
 
-            Row {
-                id: outputButtons
-                width: parent.width
-                spacing: Style.space(8)
-                Button {
-                    width: (parent.width - parent.spacing) / 2
-                    text: "Open log file"
-                    bordered: true
-                    enabled: root.logPath() !== ""
-                    fontFamily: root.family
-                    onClicked: root.openLogFile()
-                }
-                Button {
-                    width: (parent.width - parent.spacing) / 2
-                    text: "Close"
-                    bordered: true
-                    fontFamily: root.family
-                    onClicked: output.close()
-                }
+        buttons: [
+            Button {
+                width: (viewer.availableWidth - Style.space(8)) / 2
+                text: viewer.hunkCount > 1 ? "Previous change · " + (viewer.hunk + 1) + " of " + viewer.hunkCount : "Previous change"
+                bordered: true
+                enabled: viewer.hunk > 0
+                opacity: enabled ? 1 : 0.55
+                fontFamily: root.family
+                onClicked: viewer.jump(-1)
+            },
+            Button {
+                width: (viewer.availableWidth - Style.space(8)) / 2
+                text: "Next change"
+                bordered: true
+                enabled: viewer.hunk < viewer.hunkCount - 1
+                opacity: enabled ? 1 : 0.55
+                fontFamily: root.family
+                onClicked: viewer.jump(1)
+            }
+        ]
+    }
+
+    // One diff line: number, sign, text; added/removed lines get a faint tint.
+    component DiffLine: Item {
+        id: diffLine
+        property var line: null
+        readonly property string kind: line ? line.kind : "context"
+        readonly property color tint: kind === "add" ? root.accent : (kind === "remove" ? root.urgent : root.foreground)
+        implicitHeight: kind === "hunk" ? hunkText.implicitHeight + Style.space(6) : lineText.implicitHeight
+
+        Rectangle {
+            anchors.fill: parent
+            visible: diffLine.kind !== "context" && diffLine.kind !== "meta"
+            radius: diffLine.kind === "hunk" ? Style.cornerRadius : 0
+            color: Qt.rgba(diffLine.tint.r, diffLine.tint.g, diffLine.tint.b, diffLine.kind === "hunk" ? 0.06 : 0.10)
+        }
+        Text {
+            id: hunkText
+            visible: diffLine.kind === "hunk"
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: visible ? diffLine.line.text : ""
+            color: root.dim
+            font.family: root.family
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            elide: Text.ElideRight
+        }
+        Text {
+            id: gutter
+            visible: diffLine.kind !== "hunk"
+            width: Style.space(34)
+            horizontalAlignment: Text.AlignRight
+            textFormat: Text.PlainText
+            text: diffLine.line && diffLine.line.number ? String(diffLine.line.number) : ""
+            color: root.dim
+            opacity: 0.7
+            font.family: root.family
+            font.pixelSize: Style.font.caption
+        }
+        Text {
+            id: sign
+            visible: diffLine.kind !== "hunk"
+            anchors.left: gutter.right
+            anchors.leftMargin: Style.space(6)
+            width: Style.space(10)
+            textFormat: Text.PlainText
+            text: diffLine.kind === "add" ? "+" : (diffLine.kind === "remove" ? "−" : "")
+            color: diffLine.tint
+            font.family: root.family
+            font.pixelSize: Style.font.caption
+            font.bold: true
+        }
+        Text {
+            id: lineText
+            visible: diffLine.kind !== "hunk"
+            anchors.left: sign.right
+            anchors.right: parent.right
+            textFormat: Text.PlainText
+            wrapMode: Text.WrapAnywhere
+            text: visible ? (diffLine.line.text || " ") : ""
+            color: diffLine.kind === "context" ? root.foreground : (diffLine.kind === "meta" ? root.dim : diffLine.tint)
+            opacity: diffLine.kind === "context" ? 0.7 : 1
+            font.family: root.family
+            font.pixelSize: Style.font.caption
+        }
+    }
+
+    // Proportion of added to removed lines, like a tiny git --stat bar.
+    component DiffBar: Row {
+        id: bar
+        property var diff: null
+        readonly property int total: diff ? diff.added + diff.removed : 0
+        readonly property int blocks: 10
+        readonly property int addBlocks: total ? Math.round(blocks * diff.added / total) : 0
+        spacing: Style.space(2)
+        Repeater {
+            model: bar.total ? bar.blocks : 0
+            Rectangle {
+                required property int index
+                width: Style.space(5)
+                height: Style.space(8)
+                radius: 1
+                color: index < bar.addBlocks ? root.accent : root.urgent
+                opacity: 0.85
             }
         }
     }
@@ -1359,38 +1613,68 @@ Panel {
                     font.family: root.family
                     font.pixelSize: Style.font.caption
                 }
-                // Unison's diff, trimmed to its hunks, with a legend naming each side.
+                // Unison's diff, kept short in the row: size of the change, which side
+                // is which, the first lines, and the full diff one click away.
                 Column {
                     id: diffView
                     readonly property bool wanted: change.open && root.diffPath === change.item.path
                     readonly property var diff: wanted && root.sessionState.detailsPath === change.item.path
                         ? Model.parseDiff(root.sessionState.details) : null
-                    visible: diff !== null && diff.lines.length > 0
+                    readonly property var preview: diff && diff.unified ? Model.diffPreview(diff, root.previewLines) : []
+                    readonly property bool shortened: !!diff && (diff.lineCount + diff.hunks.length > preview.length || root.sessionState.detailsTruncated)
+                    visible: diff !== null
                     width: detailBox.width - detailBox.leftPadding
-                    spacing: 0
-                    Text {
-                        visible: text !== ""
-                        bottomPadding: Style.space(4)
-                        textFormat: Text.PlainText
-                        text: diffView.diff && diffView.diff.unified ? Model.diffLegend(diffView.diff, root.leftReplica, root.rightReplica) : ""
-                        color: root.dim
-                        font.family: root.family
-                        font.pixelSize: Style.font.caption
-                        font.bold: true
-                    }
-                    Repeater {
-                        model: diffView.diff ? diffView.diff.lines : []
+                    spacing: Style.space(4)
+
+                    Row {
+                        visible: !!diffView.diff && diffView.diff.unified
+                        spacing: Style.space(10)
                         Text {
-                            required property var modelData
-                            width: diffView.width
+                            anchors.verticalCenter: parent.verticalCenter
                             textFormat: Text.PlainText
-                            wrapMode: Text.WrapAnywhere
-                            text: modelData.text
-                            color: modelData.kind === "add" ? root.accent : (modelData.kind === "remove" ? root.urgent : (modelData.kind === "hunk" ? root.dim : root.foreground))
-                            opacity: modelData.kind === "context" ? 0.75 : 1
+                            text: diffView.diff ? Model.diffStat(diffView.diff) : ""
+                            color: root.foreground
+                            font.family: root.family
+                            font.pixelSize: Style.font.caption
+                            font.bold: true
+                        }
+                        DiffBar { anchors.verticalCenter: parent.verticalCenter; diff: diffView.diff }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            textFormat: Text.PlainText
+                            text: diffView.diff ? Model.diffLegend(diffView.diff, root.leftReplica, root.rightReplica) : ""
+                            color: root.dim
                             font.family: root.family
                             font.pixelSize: Style.font.caption
                         }
+                    }
+                    Text {
+                        visible: !!diffView.diff && !diffView.diff.unified
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        wrapMode: Text.WordWrap
+                        text: !diffView.diff ? "" : (diffView.diff.binary
+                            ? "Binary file · " + root.leftReplica.name + " " + (Model.formatSize(change.item.leftInfo ? change.item.leftInfo.size : null) || "—")
+                              + " · " + root.rightReplica.name + " " + (Model.formatSize(change.item.rightInfo ? change.item.rightInfo.size : null) || "—")
+                            : (diffView.diff.message || "Unison shows no differences."))
+                        color: root.dim
+                        font.family: root.family
+                        font.pixelSize: Style.font.caption
+                    }
+                    Column {
+                        width: parent.width
+                        Repeater {
+                            model: diffView.preview
+                            DiffLine { required property var modelData; width: diffView.width; line: modelData }
+                        }
+                    }
+                    Button {
+                        visible: diffView.shortened
+                        text: "View full diff"
+                        bordered: true
+                        fontFamily: root.family
+                        fontSize: Style.font.bodySmall
+                        onClicked: if (change.item) root.openFullDiff(change.item)
                     }
                 }
             }

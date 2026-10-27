@@ -27,6 +27,7 @@ PROMPT = re.compile(r"([A-Za-z ]{8}) (" + ARROWS + r") ([A-Za-z ]{8})   ([^\n]*?
 PROCEED = "Proceed with propagating updates? [] "
 FIRST_RUN = "Press return to continue.[<ret>] "
 BIG_DELETE = "Do you really want to proceed? [] "
+DETAILS_LIMIT = 120_000
 CHOICES = {"left": "<", "right": ">", "skip": "/", "default": "r", "next": "n"}
 CHOSEN = {"left": "<====", "right": "====>", "skip": "<=?=>"}
 # Listing metadata ("left : changed file  modified on … size 7 …"), the final
@@ -133,7 +134,7 @@ class Bridge:
 
     def fresh(self, phase, profile, message):
         return {"phase": phase, "profile": profile, "items": [], "current": "", "message": message, "details": "",
-                "detailsPath": "", "totals": {}, "progress": None, "result": None}
+                "detailsPath": "", "detailsTruncated": False, "totals": {}, "progress": None, "result": None}
 
     def snapshot(self):
         self.last_snapshot = time.monotonic()
@@ -353,7 +354,10 @@ class Bridge:
                 self.send("n")
                 return
         if self.awaiting_details:
-            self.state["details"] = segment[:match.start()].strip()[-40000:]
+            # Keep the start: a diff's headers and first hunks matter most.
+            details = segment[:match.start()].strip()
+            self.state["details"] = details[:DETAILS_LIMIT]
+            self.state["detailsTruncated"] = len(details) > DETAILS_LIMIT
             self.state["detailsPath"] = path
             self.awaiting_details = False
         self.rest("review")
