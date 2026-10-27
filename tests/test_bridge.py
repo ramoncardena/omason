@@ -303,7 +303,9 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(state["totals"]["items"], 2)
         self.assertEqual(state["totals"]["toRight"], "5 B")
         self.assertEqual(state["totals"]["toLeft"], "2 B")
-        self.assertTrue(all(i.get("done") for i in state["items"]))
+        self.assertTrue(all(i.get("done") and not i.get("active") for i in state["items"]))
+        self.assertIn(" of ", state["progress"]["bytes"])
+        self.assertFalse(self.bridge.dirty)
         self.assertEqual(state["result"], {"transferred": 2, "skipped": 0, "failed": 0})
         self.assertEqual(state["message"], "Synced 2 items.")
 
@@ -344,6 +346,19 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(profile["last"]["phase"], "complete")
         self.assertEqual(profile["last"]["counts"]["toRight"], 1)
         self.assertEqual(catalog["history"][0]["result"]["transferred"], 1)
+
+
+class ProgressTests(unittest.TestCase):
+    def test_begin_end_and_progress_lines(self):
+        bridge = module.Bridge(lambda _: None)
+        bridge.state["items"] = [{"path": "big file.mp4", "arrow": "---->"}, {"path": "a", "arrow": "---->"}]
+        bridge.track_progress("[BGN] Copying big file.mp4 from /x from y/left to /r\n  0%  1/2  (5 B of 1.00 GiB)  --:-- ETA")
+        self.assertTrue(bridge.find("big file.mp4")["active"])
+        self.assertEqual(bridge.state["progress"], {"percent": 0, "done": 1, "total": 2, "bytes": "5 B of 1.00 GiB"})
+        self.assertTrue(bridge.dirty)
+        bridge.track_progress("  99%  1/2  ETA[END] Copying big file.mp4\n")
+        item = bridge.find("big file.mp4")
+        self.assertEqual((item["done"], item["active"]), (True, False))
 
 
 class ReplicaTests(unittest.TestCase):

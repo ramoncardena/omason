@@ -206,9 +206,20 @@ Panel {
         if (phase === "warning") return "Needs your confirmation"
         if (sessionState.syncRequested) return "Starting sync"
         if (phase === "scanning") return sessionState.pending ? "Applying your choices" : "Working"
-        if (phase === "syncing") return "Syncing · " + (sessionState.progress ? sessionState.progress.percent : 0) + "%"
+        if (phase === "syncing") {
+            const progress = sessionState.progress
+            return "Syncing · " + (progress && progress.bytes ? progress.bytes : (progress ? progress.percent : 0) + "%")
+        }
         if (phase === "cancelling") return "Stopping safely"
-        if (phase === "complete") return sessionState.items.length ? "Synced" : "Already in sync"
+        const result = sessionState.result
+        if (phase === "complete" && !sessionState.items.length) return "Already in sync"
+        if ((phase === "complete" || phase === "partial") && result) {
+            let text = "Synced " + result.transferred + (result.transferred === 1 ? " item" : " items")
+            if (result.skipped) text += " · held " + result.skipped
+            if (result.failed) text += " · failed " + result.failed
+            return text
+        }
+        if (phase === "complete") return "Synced"
         if (phase === "partial") return "Partly synced"
         if (phase === "cancelled") return "Stopped"
         if (phase === "error") return "Unison failed"
@@ -552,7 +563,9 @@ Panel {
                         }
 
                         Caption {
-                            visible: root.view === "record" || (root.finished && root.shownItems.length > 0)
+                            // On success the hero says what happened; holding changes isn't a problem either.
+                            visible: root.view === "record" || (root.finished && root.shownItems.length > 0
+                                && (root.phase === "error" || root.phase === "cancelled" || !root.sessionState.result || root.sessionState.result.failed > 0))
                             text: root.view === "record" ? root.record.message + "\nLog: " + root.record.logPath : root.sessionState.message
                             color: root.view === "session" && root.phase !== "complete" ? root.urgent : root.dim
                         }
@@ -625,11 +638,22 @@ Panel {
                                 text: root.finished ? "Scan again" : root.syncLabel()
                                 bordered: true
                                 selected: !root.finished && root.canSync
+                                // The one action that changes files: drawn in the accent colour.
+                                foreground: !root.finished && root.canSync ? root.accent : root.foreground
                                 hasCursor: actionRow.primaryHasCursor
                                 fontFamily: root.family
                                 enabled: root.finished || root.canSync
                                 opacity: enabled ? 1 : 0.55
                                 onHovered: function(isHovered) { if (isHovered && root.syncRowVisible) root.setCursor(root.plan.rows.length) }
+                                Rectangle {
+                                    visible: !root.finished && root.canSync
+                                    anchors.fill: parent
+                                    z: -1
+                                    radius: Style.cornerRadius
+                                    color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+                                    border.width: 1
+                                    border.color: root.accent
+                                }
                                 onClicked: {
                                     if (!root.finished) { root.sync(); return }
                                     const name = root.sessionState.profile
@@ -1012,8 +1036,15 @@ Panel {
                 spacing: Style.space(10)
 
                 Text {
-                    text: change.item ? (change.item.done ? Model.glyph.check : Model.kindGlyph(change.item)) : ""
-                    color: change.item && change.item.done ? root.accent : root.dim
+                    id: rowGlyph
+                    readonly property bool active: !!change.item && !!change.item.active && root.syncing
+                    text: change.item ? (change.item.done ? Model.glyph.check : (active ? Model.glyph.sync : Model.kindGlyph(change.item))) : ""
+                    color: change.item && (change.item.done || active) ? root.accent : root.dim
+                    RotationAnimation on rotation {
+                        running: rowGlyph.active
+                        from: 0; to: -360; duration: 1200; loops: Animation.Infinite
+                        onRunningChanged: if (!running) rowGlyph.rotation = 0
+                    }
                     font.family: root.family
                     font.pixelSize: Style.font.body
                     Layout.preferredWidth: Style.space(16)
@@ -1054,6 +1085,7 @@ Panel {
                 }
                 Rectangle {
                     id: pill
+                    opacity: change.item && change.item.done ? 0.4 : 1
                     Layout.preferredWidth: Style.space(44)
                     Layout.preferredHeight: Style.space(22)
                     radius: Style.cornerRadius

@@ -36,8 +36,10 @@ SIZE = re.compile(r"\bsize (\d+)")
 MODIFIED = re.compile(r"modified on (\d{4}-\d\d-\d\d) at\s+(\d+:\d\d:\d\d)")
 TOTAL = re.compile(r"(\d[\d.]* ?[KMGT]?i?B) to be synced from ")
 SUMMARY = re.compile(r"(\d+) items? will be synced(?:, (\d+) skipped)?")
-END = re.compile(r"\[END\] (?:Updating file|Updating properties of|Copying properties for|Copying|Deleting) (.+)")
-PROGRESS = re.compile(r"(\d+)%\s+(\d+)/(\d+)")
+VERBS = r"(?:Updating file|Updating properties of|Copying properties for|Copying|Deleting)"
+BEGIN = re.compile(r"\[BGN\] " + VERBS + r" (.+)")
+END = re.compile(r"\[END\] " + VERBS + r" (.+)")
+PROGRESS = re.compile(r"(\d+)%\s+(\d+)/(\d+)\s+\(([^)]*)\)")
 RESULT = re.compile(r"\((\d+) items? transferred, (\d+) skipped, (\d+) failed\)")
 HOST = socket.gethostname().split(".")[0]
 
@@ -126,6 +128,7 @@ class Bridge:
         self.started = 0.0
         self.run_id = ""
         self.last_snapshot = 0.0
+        self.dirty = False
         self.state = self.fresh("idle", "", "Choose a profile to review changes.")
 
     def fresh(self, phase, profile, message):
@@ -134,6 +137,7 @@ class Bridge:
 
     def snapshot(self):
         self.last_snapshot = time.monotonic()
+        self.dirty = False
         self.emit({"type": "state", **self.state, "run": self.run_id, "pending": len(self.queue),
                    "syncRequested": self.sync_requested, "tail": self.tail[-12000:]})
 
@@ -283,14 +287,21 @@ class Bridge:
     def track_progress(self, text, kind="stdout"):
         *lines, self.sync_text[kind] = (self.sync_text.get(kind, "") + text).split("\n")
         for line in lines:
-            done = END.search(line)
+            # A line can hold both: "…ETA[END] Copying a" after "[BGN] Copying a from …".
+            begun, done = BEGIN.search(line), END.search(line)
+            # "<path> from <root>": either may contain " from ", so match known paths.
+            item = max((i for i in self.state["items"] if begun and begun.group(1).startswith(i["path"] + " from ")),
+                       key=lambda i: len(i["path"]), default=None)
+            if item:
+                item["active"] = True
             item = self.find(done.group(1).rstrip("\r")) if done else None
             if item:
-                item["done"] = True
+                item["done"], item["active"] = True, False
         progress = list(PROGRESS.finditer(text))
         if progress:
-            percent, finished, total = (int(g) for g in progress[-1].groups())
-            self.state["progress"] = {"percent": percent, "done": finished, "total": total}
+            percent, finished, total, transferred = progress[-1].groups()
+            self.state["progress"] = {"percent": int(percent), "done": int(finished), "total": int(total), "bytes": transferred}
+        self.dirty = True
 
     def consume(self, text):
         if self.state["phase"] in ("syncing", "cancelling"):
@@ -588,6 +599,10 @@ class Bridge:
                 self.track_progress(text, kind)
                 if time.monotonic() - self.last_snapshot > 0.25:
                     self.snapshot()
+        # Progress snapshots are rate-limited; never leave the latest one unsent
+        # (a single large local copy can be silent for a long time).
+        if self.dirty and time.monotonic() - self.last_snapshot > 0.25:
+            self.snapshot()
         if self.child and self.child.poll() is not None and not self.selector.get_map():
             self.complete(self.child.returncode)
         if self.child and self.state["phase"] == "scanning" and time.monotonic() - self.last_output > 120:

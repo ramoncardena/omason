@@ -136,6 +136,11 @@ Profiles, Unison archives/backups, and omaSon history are retained on removal.
 ./scripts/check.sh
 ```
 
+`scripts/demo.sh` creates (or resets) a disposable `omason-demo` profile under
+`~/.cache/omason-demo` with a conflict, edits, a deletion, and new files on
+both sides. `--big` adds a 1 GB file to watch sync progress; `--remove`
+deletes the demo folders, profile, and only the demo's Unison archives.
+
 The integration suite runs real Unison against disposable directories. It never
 reads or modifies the user's real profiles, replicas, or archives. The lint
 script suppresses only the dynamic-property warnings also present in Omarchy's
