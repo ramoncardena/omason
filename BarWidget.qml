@@ -15,6 +15,9 @@ BarWidget {
     property string profileDirectory: "~/.unison"
     property string stateDirectory: ""
     property string errorMessage: ""
+    property var checks: ({})
+    property string notice: ""
+    property string pickField: ""
     property var session: ({ phase: "idle", items: [], current: "", profile: "", message: "Choose a profile to review changes.", details: "", detailsPath: "", tail: "", run: "", totals: {}, progress: null, pending: 0, syncRequested: false })
     readonly property bool busy: ["scanning", "review", "ready", "warning", "syncing", "cancelling"].indexOf(session.phase) >= 0
     readonly property bool working: session.phase === "scanning" || session.phase === "syncing" || session.phase === "cancelling"
@@ -51,8 +54,11 @@ BarWidget {
                 const before = session.phase
                 session = data
                 if (["scanning", "syncing", "cancelling", "review", "ready", "warning"].indexOf(before) >= 0) notifyIfClosed(data)
+            } else if (data.type === "check") {
+                checks = data.results
             } else if (data.type === "created") {
                 selectedProfile = data.profile
+                notice = "Created " + data.profile + "." + (data.note ? " " + data.note : "")
                 if (panelLoader.item) panelLoader.item.creating = false
             } else if (data.type === "error") {
                 errorMessage = data.error
@@ -71,6 +77,28 @@ BarWidget {
         stderr: StdioCollector { id: diagnostics; waitForEnd: true }
         onExited: function(exitCode) {
             root.errorMessage = "omaSon helper stopped (" + exitCode + "). " + diagnostics.text.slice(-1000)
+        }
+    }
+
+    // Folder chooser for the new-profile form; see Panel.browse().
+    function browse(field, start, title) {
+        if (picker.running) return
+        pickField = field
+        close()
+        picker.command = ["python3", root.helperPath, "pick", title, start]
+        picker.running = true
+    }
+
+    Process {
+        id: picker
+        stdout: StdioCollector { id: picked; waitForEnd: true }
+        stderr: StdioCollector { id: pickErrors; waitForEnd: true }
+        onExited: function(exitCode) {
+            root.open()
+            const path = picked.text.trim()
+            const problem = pickErrors.text.trim()
+            if (exitCode !== 0 && problem) root.errorMessage = "The folder chooser is unavailable: " + problem.split("\n").pop()
+            else if (path && panelLoader.item) panelLoader.item.applyPick(root.pickField, path)
         }
     }
 

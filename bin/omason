@@ -72,6 +72,22 @@ def fatal(text):
     return detail[:300]
 
 
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_. -]{0,79}")
+
+
+def ignore_lines(text):
+    """'node_modules, *.log' -> Unison ignore lines; full specs (Path …, Regex …) kept as written."""
+    lines = []
+    for pattern in (p.strip() for p in text.replace("\n", ",").split(",")):
+        if not pattern:
+            continue
+        if any(c in pattern for c in "\r\x00"):
+            raise ValueError("Ignore patterns must be plain text.")
+        spec = pattern if re.match(r"(Name|Path|BelowPath|Regex) ", pattern) else "Name " + pattern
+        lines.append("ignore = " + spec)
+    return lines
+
+
 def describe(text):
     size, modified = SIZE.search(text), MODIFIED.search(text)
     return {"state": text.split("  ")[0].strip(), "size": int(size.group(1)) if size else None,
@@ -213,10 +229,151 @@ class Bridge:
                    "available": bool(shutil.which("unison")), "profileDirectory": str(self.unison_dir),
                    "stateDirectory": str(self.state_dir)})
 
+    # ---- profile creation ----------------------------------------------
+
+    def profile_file(self, name):
+        return self.unison_dir / (name + ".prf")
+
+    def read_profile(self, name):
+        """(key, value, line) for each line of an existing profile."""
+        if not isinstance(name, str) or not NAME.fullmatch(name) or ".." in name or not self.profile_file(name).is_file():
+            raise ValueError("Choose an existing profile pair.")
+        rows = []
+        for line in self.profile_file(name).read_text().splitlines():
+            key, sep, value = line.partition("=")
+            rows.append((key.strip() if sep else "", value.strip(), line))
+        return rows
+
+    def check_name(self, name):
+        if not name:
+            return {"status": "", "text": ""}
+        if not NAME.fullmatch(name) or ".." in name:
+            return {"status": "error", "text": "Start with a letter or number; no slashes or '..'."}
+        if self.profile_file(name).exists():
+            return {"status": "error", "text": "A profile with this name already exists."}
+        return {"status": "ok", "text": f"Saved as {name}.prf"}
+
+    def check_root(self, root):
+        if not root:
+            return {"status": "", "text": ""}
+        if any(c in root for c in "\r\n\x00"):
+            return {"status": "error", "text": "Use a single line."}
+        if root.startswith(("ssh://", "socket://")):
+            info = replica(root)
+            if not info["name"]:
+                return {"status": "error", "text": "Add a host: ssh://user@host//absolute/path"}
+            return {"status": "info", "text": f"Remote root on {info['name']} · checked when you scan"}
+        path = Path(root).expanduser()
+        if not path.is_absolute():
+            return {"status": "error", "text": "Use an absolute path, or ssh://user@host//path"}
+        info = replica(str(path))
+        if path.is_dir():
+            return {"status": "ok", "text": f"Folder exists on drive {info['name']}" if info["kind"] == "removable" else "Folder exists"}
+        if path.exists():
+            return {"status": "error", "text": "This is a file, not a folder."}
+        if info["kind"] == "removable":
+            mount = Path(*path.parts[:5]) if path.parts[1:3] == ("run", "media") else Path(*path.parts[:3])
+            if not mount.is_dir():
+                return {"status": "error", "text": f"Drive {info['name']} is not mounted."}
+        return {"status": "error", "text": "Folder not found."}
+
+    def pair_sides(self, template, folder):
+        """The template's two roots and, per side, whether `folder` exists there."""
+        rows = self.read_profile(template)
+        roots = [v for k, v, _ in rows if k == "root"]
+        if len(roots) != 2:
+            raise ValueError("That pair's profile does not define two roots.")
+        sides = []
+        for root in roots:
+            info = replica(root)
+            local = info["kind"] in ("local", "removable")
+            target = Path(root).expanduser() / folder if local else None
+            sides.append({**info, "exists": target.is_dir() if local and info["online"] else None, "target": target})
+        return rows, roots, sides
+
+    def check_folder(self, folder, template):
+        folder = folder.strip().strip("/")
+        if not folder:
+            return {"status": "", "text": ""}
+        if ".." in folder.split("/") or any(c in folder for c in "\r\n\x00"):
+            return {"status": "error", "text": "Use a folder inside the pair, without '..'."}
+        rows, roots, sides = self.pair_sides(template, folder)
+        mountpoint = any(k == "mountpoint" for k, _, _ in rows)
+        # Already synced by another profile on the same pair?
+        for path in sorted(self.unison_dir.glob("*.prf")):
+            try:
+                other = [(k.strip(), v.strip()) for k, _, v in (line.partition("=") for line in path.read_text().splitlines())]
+            except (OSError, UnicodeError):
+                continue
+            if [v for k, v in other if k == "root"] != roots:
+                continue
+            paths = [v.strip("/") for k, v in other if k == "path"]
+            if not paths:
+                return {"status": "error", "text": f"{path.stem} already syncs this whole pair."}
+            for p in paths:
+                if folder == p or folder.startswith(p + "/"):
+                    return {"status": "error", "text": f"Already synced by {path.stem}."}
+                if p.startswith(folder + "/"):
+                    return {"status": "warn", "text": f"Contains {p}, already synced by {path.stem}."}
+        names = [s["name"] for s in sides]
+        offline = [s for s in sides if s["online"] is False]
+        if offline:
+            return {"status": "warn", "text": f"{offline[0]['name']} is not connected, so it can't be checked."}
+        found = [s["exists"] for s in sides]
+        if found == [True, True]:
+            return {"status": "ok", "text": "Exists on both sides."}
+        if found == [False, False]:
+            return {"status": "error", "text": "Not found on either side."}
+        if None in found:
+            known = sides[found.index(True)]["name"] if True in found else None
+            return {"status": "info", "text": (f"Exists on {known}; " if known else "") + "the remote side is checked when you scan."}
+        have, missing = (names[0], names[1]) if found[0] else (names[1], names[0])
+        if mountpoint:
+            return {"status": "warn", "text": f"Only on {have}. An empty {folder} folder will be created on {missing}."}
+        return {"status": "warn", "text": f"Only on {have}. It will be copied to {missing} on the first sync."}
+
+    def check(self, request):
+        fields = request.get("fields") or {}
+        results = {}
+        for field, value in fields.items():
+            value = str(value).strip()
+            try:
+                if field == "name":
+                    result = self.check_name(value)
+                elif field in ("left", "right"):
+                    result = self.check_root(value)
+                elif field == "folder":
+                    result = self.check_folder(value, request.get("template"))
+                elif field == "ignore":
+                    patterns = ignore_lines(value)
+                    result = {"status": "info", "text": f"{len(patterns)} ignore pattern{'s' if len(patterns) != 1 else ''}"} if patterns else {"status": "", "text": ""}
+                else:
+                    continue
+            except (ValueError, OSError) as exc:
+                result = {"status": "error", "text": str(exc)}
+            results[field] = {**result, "value": value}
+        self.emit({"type": "check", "results": results})
+
+    def write_profile(self, name, text):
+        self.unison_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # O_EXCL also refuses existing symlinks. Never overwrite a user profile.
+        fd = os.open(self.profile_file(name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+
     def create(self, request):
         name = str(request.get("name", "")).strip()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_. -]{0,79}", name) or ".." in name:
+        if not NAME.fullmatch(name) or ".." in name:
             raise ValueError("Use a profile name beginning with a letter or number, without slashes or '..'.")
+        ignores = ignore_lines(str(request.get("ignore", "")))
+        if request.get("mode") == "folder":
+            note = self.create_in_pair(name, request.get("template"), str(request.get("folder", "")), ignores)
+        else:
+            note = self.create_pair(name, request, ignores)
+        self.emit({"type": "created", "profile": name, "note": note})
+        self.catalog()
+
+    def create_pair(self, name, request, ignores):
         roots = [str(request.get(k, "")).strip() for k in ("left", "right")]
         if not all(roots) or any(any(c in r for c in "\r\n\x00") for r in roots):
             raise ValueError("Enter two roots, each on one line.")
@@ -229,13 +386,38 @@ class Bridge:
             roots[i] = str(path)
         if roots[0] == roots[1]:
             raise ValueError("The two roots must differ.")
-        self.unison_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        # O_EXCL also refuses existing symlinks. Never overwrite a user profile.
-        fd = os.open(self.unison_dir / (name + ".prf"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(f"# Created by omaSon\nroot = {roots[0]}\nroot = {roots[1]}\n\n# Keep replaced and deleted versions in Unison's backup store.\nbackup = Name *\nmaxbackups = 5\n")
-        self.emit({"type": "created", "profile": name})
-        self.catalog()
+        ignore = "".join(line + "\n" for line in ignores)
+        self.write_profile(name, f"# Created by omaSon\nroot = {roots[0]}\nroot = {roots[1]}\n{ignore}\n# Keep replaced and deleted versions in Unison's backup store.\nbackup = Name *\nmaxbackups = 5\n")
+        return ""
+
+    def create_in_pair(self, name, template, folder, ignores):
+        """A profile like the template's (same roots and options) for one more folder."""
+        folder = folder.strip().strip("/")
+        check = self.check_folder(folder, template)
+        if not folder or check["status"] == "error":
+            raise ValueError(check["text"] or "Enter a folder.")
+        rows, roots, sides = self.pair_sides(template, folder)
+        mountpoint = any(k == "mountpoint" for k, _, _ in rows)
+        note = ""
+        if mountpoint:
+            # Unison refuses to run until a mountpoint exists on both sides.
+            for side in sides:
+                if side["exists"] is False:
+                    side["target"].mkdir(parents=True)
+                    note = f"Created an empty {folder} folder on {side['name']}."
+            mountpoint = all(s["exists"] is not None for s in sides)
+        # Keep the template's options; replace what is specific to its folder.
+        specific = {"root", "path", "mountpoint", "ignore", "ignorenot", "label"}
+        # Comments describe the template's folder, so only options are copied.
+        kept = [line for key, _, line in rows if key not in specific and not line.lstrip().startswith("#")]
+        while kept and not kept[0].strip():
+            kept.pop(0)
+        text = f"# Created by omaSon from {template}\nroot = {roots[0]}\nroot = {roots[1]}\npath = {folder}\n"
+        text += f"mountpoint = {folder}\n" if mountpoint else ""
+        text += "".join(line + "\n" for line in ignores)
+        text += "\n" + "\n".join(kept) + "\n" if kept else ""
+        self.write_profile(name, text)
+        return note
 
     def start(self, profile):
         if self.child:
@@ -477,6 +659,8 @@ class Bridge:
             self.catalog()
         elif cmd == "create":
             self.create(request)
+        elif cmd == "check":
+            self.check(request)
         elif cmd == "start":
             self.start(request.get("profile"))
         elif cmd == "acknowledge" and phase == "warning":
@@ -664,10 +848,60 @@ class Bridge:
         self.release()
 
 
+def pick(title, start=""):
+    """Ask the desktop's folder chooser (XDG portal) for a folder; print its path.
+
+    Prints nothing if the dialog is cancelled. Run separately from `serve` so
+    the helper never blocks on a dialog.
+    """
+    import urllib.parse
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
+
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+    token = "omason" + uuid.uuid4().hex
+    sender = bus.get_unique_name().lstrip(":").replace(".", "_")
+    handle = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
+    loop, chosen = GLib.MainLoop(), []
+
+    def response(_bus, _sender, _path, _iface, _signal, params):
+        code, results = params.unpack()
+        if code == 0 and results.get("uris"):
+            chosen.append(urllib.parse.unquote(urllib.parse.urlparse(results["uris"][0]).path))
+        loop.quit()
+
+    # Subscribe before calling so a fast answer can't be missed.
+    bus.signal_subscribe("org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request", "Response",
+                         handle, None, Gio.DBusSignalFlags.NO_MATCH_RULE, response)
+    options = {"handle_token": GLib.Variant("s", token), "directory": GLib.Variant("b", True),
+               "modal": GLib.Variant("b", True)}
+    if start and Path(start).expanduser().is_dir():
+        options["current_folder"] = GLib.Variant("ay", str(Path(start).expanduser()).encode() + b"\0")
+    bus.call_sync("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                  "org.freedesktop.portal.FileChooser", "OpenFile",
+                  GLib.Variant("(ssa{sv})", ("", title, options)), None, Gio.DBusCallFlags.NONE, -1, None)
+    # Being stopped (the panel, a logout) closes the dialog: treat it as cancel.
+    try:
+        gi.require_version("GLibUnix", "2.0")
+        from gi.repository import GLibUnix
+        add_signal = GLibUnix.signal_add
+    except (ImportError, ValueError):
+        add_signal = GLib.unix_signal_add
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        add_signal(GLib.PRIORITY_DEFAULT, sig, loop.quit)
+    loop.run()
+    if chosen:
+        print(chosen[0])
+    return 0
+
+
 def main():
     os.umask(0o077)
+    if sys.argv[1:2] == ["pick"] and len(sys.argv) in (3, 4):
+        return pick(*sys.argv[2:])
     if sys.argv[1:] != ["serve"]:
-        print("Usage: omason serve (JSON lines on stdin/stdout)", file=sys.stderr)
+        print("Usage: omason serve (JSON lines on stdin/stdout) | omason pick TITLE [START]", file=sys.stderr)
         return 2
     bridge = Bridge()
     stop = False

@@ -44,10 +44,27 @@ omarchy-shell shell summon io.github.ramoncardena.omason '{}'
    or folder, or `←`/`→` to step through profiles. The panel opens on the
    profile you used last. The selected profile shows its two replicas, what
    it covers, its last run and its recent runs. A replica on an unplugged
-   drive is flagged and scanning waits until it is connected. **New profile** (or `N`) pairs two existing local folders, or a
-   local folder and an SSH root such as `ssh://user@host//absolute/path`, with
-   a live preview of both sides. New profiles enable Unison backups and keep
-   five versions. Existing profile preferences are preserved.
+   drive is flagged and scanning waits until it is connected.
+
+   **New profile** (`N` or **+**) has two modes:
+   - **Add a folder to a pair**, for profiles that share two roots and each
+     sync one folder (`path = …`), like `gator-desktop` and `gator-music`.
+     Choose the pair and the folder (typed, or with **Browse…**). The new
+     profile copies the roots and options of a profile in that pair, leaving
+     out its folder, ignore rules and comments, and suggests a name with the
+     same prefix. If that profile uses `mountpoint` (Unison's guard against an
+     unmounted drive), the folder must exist on both sides, so omaSon creates
+     an empty one where it is missing, and says so before you create.
+   - **New pair**: two existing local folders, or a local folder and an SSH
+     root such as `ssh://user@host//absolute/path`. New pairs enable Unison
+     backups and keep five versions.
+
+   Each field is checked as you type: whether a folder exists, a drive is
+   mounted, a folder is already synced by another profile, or a name is
+   taken. Errors disable **Create profile**. Optional ignore patterns
+   (`node_modules, *.log`) become `ignore = Name …` rules; `Path …` and
+   `Regex …` rules can be written in full. Existing profile files are never
+   modified.
 2. Scanning launches Unison's text interface. Its first-run and whole-replica
    deletion warnings appear as a card that needs a separate confirmation.
 3. The review screen shows the two replicas facing each other, with counts of

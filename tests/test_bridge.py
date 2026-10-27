@@ -367,6 +367,55 @@ class IntegrationTests(unittest.TestCase):
         self.assertTrue(self.bridge.find("fine.txt")["done"])
         self.assertEqual(self.bridge.state["result"]["failed"], 1)
 
+    def check(self, **fields):
+        template = fields.pop("template", None)
+        self.events.clear()
+        self.command("check", fields=fields, template=template)
+        return next(e for e in self.events if e["type"] == "check")["results"]
+
+    def test_create_folder_in_existing_pair(self):
+        self.assertIn("already syncs this whole pair", self.check(folder="x", template="test")["folder"]["text"])
+        self.profile.unlink()  # "test" covers the whole pair; use per-folder profiles instead
+        (self.left / "Docs").mkdir()
+        (self.right / "Docs").mkdir()
+        (self.left / "Music").mkdir()
+        (self.config / "pair-docs.prf").write_text(
+            f"# mine\nroot = {self.left}\nroot = {self.right}\npath = Docs\nmountpoint = Docs\n"
+            "ignore = Name *.tmp\nlabel = Docs\ntimes = true\nperms = 0\n")
+        results = self.check(folder="Music", name="pair-music", template="pair-docs")
+        self.assertEqual(results["folder"]["status"], "warn")
+        self.assertIn("An empty Music folder will be created on right replica", results["folder"]["text"])
+        self.assertEqual(results["name"]["status"], "ok")
+        self.assertEqual(self.check(folder="Docs", template="pair-docs")["folder"]["status"], "error")
+        self.assertIn("Already synced by pair-docs", self.check(folder="Docs/sub", template="pair-docs")["folder"]["text"])
+        self.assertEqual(self.check(folder="Nope", template="pair-docs")["folder"]["status"], "error")
+        self.assertEqual(self.check(name="pair-docs")["name"]["status"], "error")
+
+        self.command("create", mode="folder", name="pair-music", template="pair-docs", folder="Music/", ignore="*.log, Path cache")
+        created = next(e for e in self.events if e["type"] == "created")
+        self.assertIn("Created an empty Music folder", created["note"])
+        self.assertTrue((self.right / "Music").is_dir())
+        text = (self.config / "pair-music.prf").read_text()
+        self.assertIn(f"root = {self.left}\nroot = {self.right}\npath = Music\nmountpoint = Music\n", text)
+        self.assertIn("ignore = Name *.log\nignore = Path cache\n", text)
+        self.assertIn("times = true\nperms = 0", text)
+        for gone in ("path = Docs", "*.tmp", "label = Docs", "# mine"):
+            self.assertNotIn(gone, text)
+        (self.left / "Music" / "song.mp3").write_text("la")
+        self.bridge.start("pair-music")
+        self.assertEqual(self.wait({"review", "complete", "error"}), "review")
+        self.assertEqual(self.apply(), "complete")
+        self.assertTrue((self.right / "Music" / "song.mp3").exists())
+
+    def test_root_checks(self):
+        (self.root / "file").write_text("x")
+        results = self.check(left=str(self.left), right=str(self.root / "missing"))
+        self.assertEqual((results["left"]["status"], results["right"]["status"]), ("ok", "error"))
+        self.assertEqual(self.check(left=str(self.root / "file"))["left"]["text"], "This is a file, not a folder.")
+        self.assertEqual(self.check(left="relative/path")["left"]["status"], "error")
+        self.assertEqual(self.check(right="ssh://me@box//srv")["right"]["status"], "info")
+        self.assertIn("not mounted", self.check(right="/run/media/nobody/NO_SUCH_DRIVE/x")["right"]["text"])
+
     def test_catalog_replicas_and_last_run(self):
         (self.left / "one").write_text("one")
         self.scan()
@@ -410,6 +459,13 @@ class ProgressTests(unittest.TestCase):
         bridge.track_progress("  99%  1/2  ETA[END] Copying big file.mp4\n")
         item = bridge.find("big file.mp4")
         self.assertEqual((item["done"], item["active"]), (True, False))
+
+
+class IgnoreTests(unittest.TestCase):
+    def test_ignore_lines(self):
+        self.assertEqual(module.ignore_lines(" node_modules, *.log ,, Regex .*/tmp"),
+                         ["ignore = Name node_modules", "ignore = Name *.log", "ignore = Regex .*/tmp"])
+        self.assertEqual(module.ignore_lines(""), [])
 
 
 class ReplicaTests(unittest.TestCase):

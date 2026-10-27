@@ -29,7 +29,8 @@ var glyph = {
   rescan: g(0xF0450),
   close: g(0xF0156),
   back: g(0xF004D),
-  swap: g(0xF04E1)
+  swap: g(0xF04E1),
+  info: g(0xF02FC)
 }
 
 // Unison arrows: "---->" recommended, "====>" chosen by the user, "?" held
@@ -253,6 +254,41 @@ function profileScope(profile, name) {
   return parts.join("  ·  ")
 }
 
+// Pairs a folder can be added to: groups whose profiles each sync one folder
+// (path = …), like gator-desktop, gator-music… The first profile is the template.
+function profilePairs(profiles) {
+  var groups = profileGroups(profiles).entries.filter(function(e) { return e.header }).map(function(e) { return e.group })
+  return groups.filter(function(g) {
+    return g.profiles.every(function(p) { return p.replicas && p.replicas.length === 2 && p.paths && p.paths.length })
+  }).map(function(g) {
+    var labels = g.profiles.map(function(p) { return p.label })
+    var prefix = sharedPrefix(labels)
+    // One profile like "gator-backups" for path Backups: reuse its "gator-".
+    var only = g.profiles.length === 1 ? g.profiles[0] : null
+    var tail = only && only.paths.length === 1 ? slug(only.paths[0].split("/").pop()) : ""
+    if (only && tail && only.label.toLowerCase().slice(-tail.length) === tail && only.label.length > tail.length)
+      prefix = only.label.slice(0, only.label.length - tail.length)
+    var right = g.right.kind === "local" ? g.right.name : g.right.name + " " + g.right.path
+    return { template: g.profiles[0].name, profiles: g.profiles.map(function(p) { return p.name }),
+             left: g.left, right: g.right, prefix: prefix,
+             label: g.left.name + "  " + glyph.swap + "  " + right + "   ·   " + g.profiles.length + (g.profiles.length === 1 ? " folder" : " folders") }
+  })
+}
+
+// A replica with a folder appended, for the form's preview cards.
+function withFolder(replica, folder) {
+  if (!replica) return { kind: "local", name: "Pair", path: "Choose a pair" }
+  folder = String(folder || "").replace(/^\/+|\/+$/g, "")
+  var base = replica.path === "~" || replica.path === "/" ? replica.path.replace(/\/$/, "") : replica.path
+  return { kind: replica.kind, name: replica.name, host: replica.host, online: replica.online,
+           path: folder ? base + "/" + folder : replica.path }
+}
+
+// "Music Videos" -> "music-videos": a safe, lower-case profile name part.
+function slug(text) {
+  return String(text || "").toLowerCase().replace(/[^a-z0-9_.]+/g, "-").replace(/^[-.]+|-+$/g, "")
+}
+
 function profileCoverage(profile) {
   if (!profile) return ""
   return profile.paths && profile.paths.length ? profile.paths.join(", ") : "Entire replica"
@@ -275,9 +311,17 @@ function offlineReplica(profile) {
   return null
 }
 
-function statusGlyph(phase) {
+// A run needs attention when it failed, or finished partly for a reason other
+// than changes the user chose to hold.
+function runProblem(run) {
+  if (!run) return false
+  if (run.phase === "error") return true
+  return run.phase === "partial" && !(run.result && run.result.failed === 0)
+}
+
+function statusGlyph(phase, result) {
   if (phase === "complete") return glyph.check
-  if (phase === "partial") return glyph.conflict
+  if (phase === "partial") return result && result.failed === 0 ? glyph.held : glyph.conflict
   if (phase === "error") return glyph.error
   if (phase === "cancelled") return glyph.stop
   return ""

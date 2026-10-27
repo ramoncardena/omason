@@ -27,6 +27,27 @@ Panel {
     // Which screen is showing is derived from session state, so closing and
     // reopening the popup always lands on the live session.
     property bool creating: false
+    property string createMode: "folder"
+    property string formTemplate: ""
+    property bool nameEdited: false
+    // Pairs a folder can be added to: shared roots, one folder per profile.
+    readonly property var pairs: Model.profilePairs(host.profiles)
+    readonly property var formPair: pairs.find(function(p) { return p.template === root.formTemplate }) || null
+    readonly property var formLeft: createMode === "folder" ? Model.withFolder(formPair ? formPair.left : null, folderField.text) : Model.classify(leftField.text)
+    readonly property var formRight: createMode === "folder" ? Model.withFolder(formPair ? formPair.right : null, folderField.text) : Model.classify(rightField.text)
+    // Required fields filled, and no live check reporting an error for what's typed.
+    readonly property bool canCreate: {
+        if (!creating || host.busy) return false
+        const fields = formFields()
+        const required = createMode === "folder" ? ["name", "folder"] : ["name", "left", "right"]
+        if (createMode === "folder" && !formPair) return false
+        for (const key of required) if (!String(fields[key] || "").trim()) return false
+        for (const key in fields) {
+            const result = host.checks ? host.checks[key] : null
+            if (result && result.status === "error" && result.value === String(fields[key]).trim()) return false
+        }
+        return true
+    }
     property var record: null
     property string dismissedRun: ""
     property string expandedPath: ""
@@ -179,11 +200,64 @@ Panel {
     function openCreate() {
         if (host.busy) return
         record = null
+        for (const field of [folderField, nameField, leftField, rightField, ignoreField]) field.text = ""
+        nameEdited = false
+        createMode = pairs.length ? "folder" : "pair"
+        const current = pairs.find(function(p) { return p.profiles.indexOf(root.host.selectedProfile) >= 0 })
+        formTemplate = current ? current.template : (pairs.length ? pairs[0].template : "")
+        if (root.hostWidget) { root.hostWidget.notice = ""; root.hostWidget.checks = ({}) }
         creating = true
         focusDelay.restart()
     }
     function cancelForm() { creating = false; keyCatcher.forceActiveFocus() }
-    function saveProfile() { send("create", { name: nameField.text, left: leftField.text, right: rightField.text }) }
+    function setCreateMode(mode) {
+        createMode = mode
+        if (!nameEdited) nameField.text = ""
+        suggestName()
+        scheduleCheck()
+        focusDelay.restart()
+    }
+    function formFields() {
+        const fields = { name: nameField.text, ignore: ignoreField.text }
+        if (createMode === "folder") fields.folder = folderField.text
+        else { fields.left = leftField.text; fields.right = rightField.text }
+        return fields
+    }
+    function scheduleCheck() { if (creating) checkTimer.restart() }
+    // "gator-" + "music" in a pair of gator-* profiles; the folder name otherwise.
+    function suggestName() {
+        if (nameEdited || !creating) return
+        const source = createMode === "folder" ? folderField.text : leftField.text
+        const base = Model.slug(source.replace(/\/+$/, "").split("/").pop())
+        nameField.text = base ? (createMode === "folder" && formPair ? formPair.prefix : "") + base : ""
+    }
+    function saveProfile() {
+        if (!canCreate) return
+        send("create", Object.assign({ mode: createMode, template: formTemplate }, formFields()))
+    }
+    // The folder chooser is a normal window, which would open behind this
+    // full-screen panel: the widget closes the panel, runs it, and reopens.
+    function browse(field) {
+        if (!root.hostWidget) return
+        const start = field === "folder" ? (formPair ? formPair.left.root : "")
+            : (field === "left" ? leftField.text : rightField.text) || ""
+        const titles = { folder: "Choose a folder inside " + (formPair ? formPair.left.name : "the pair"), left: "Choose the left replica", right: "Choose the right replica" }
+        root.hostWidget.browse(field, start, titles[field])
+    }
+    function applyPick(field, path) {
+        if (field === "folder") {
+            const roots = formPair ? [formPair.left.root, formPair.right.root] : []
+            const inside = roots.find(function(r) { return path === r || path.indexOf(r.replace(/\/+$/, "") + "/") === 0 })
+            if (inside === undefined) {
+                if (root.hostWidget) root.hostWidget.errorMessage = "Choose a folder inside " + formPair.left.name + " or " + formPair.right.name + "."
+            } else {
+                folderField.text = path.slice(inside.replace(/\/+$/, "").length + 1)
+            }
+        } else {
+            (field === "left" ? leftField : rightField).text = path
+        }
+        Qt.callLater(function() { ({ folder: folderField, left: leftField, right: rightField })[field].forceActiveFocus() })
+    }
     function fieldKey(event, next) {
         if (event.key === Qt.Key_Escape) { cancelForm(); event.accepted = true }
         else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && next) { next.forceActiveFocus(); event.accepted = true }
@@ -291,7 +365,7 @@ Panel {
             if (r && offline.indexOf(r.name) < 0) offline.push(r.name)
         })
         if (offline.length) return offline.join(", ") + " not connected"
-        const failed = profiles.filter(function(p) { return p.last && (p.last.phase === "error" || p.last.phase === "partial") }).length
+        const failed = profiles.filter(function(p) { return Model.runProblem(p.last) }).length
         if (failed) return count + " · " + failed + (failed === 1 ? " needs attention" : " need attention")
         const last = host.history.find(function(r) { return r.committed })
         if (last) return count + " · last sync " + Model.relativeTime(last.finished, now)
@@ -309,14 +383,19 @@ Panel {
     function hint() {
         if (view === "home") return "←→ profile · P search · ⏎ scan · N new profile · Esc close"
         if (view === "record") return "↑↓ move · ⏎ details · ⌫ back"
-        if (view === "create") return "⏎ next field · Esc cancel"
+        if (view === "create") return "⏎ next field · Tab moves · Esc cancel"
         if (finished) return "R scan again · ⏎ / ⌫ done · V output"
         if (syncing) return "C stop sync · V output"
         if (phase === "warning") return "C cancel · V output"
         return "←→ direction · X hold · U reset · D diff · F full diff · G sync · C cancel"
     }
 
-    Timer { id: focusDelay; interval: 120; onTriggered: if (root.creating) nameField.forceActiveFocus() }
+    Timer { id: focusDelay; interval: 120; onTriggered: if (root.creating) (root.createMode === "folder" ? folderField : nameField).forceActiveFocus() }
+    Timer {
+        id: checkTimer
+        interval: 250
+        onTriggered: root.send("check", { fields: root.formFields(), template: root.formTemplate })
+    }
     Timer { interval: 30000; running: root.opened; repeat: true; onTriggered: root.now = Date.now() }
     Timer {
         interval: 2400
@@ -398,7 +477,7 @@ Panel {
                         : (root.view === "create" ? "New profile"
                         : ((root.shownProfile ? root.shownProfile.label : (root.view === "record" ? root.record.profile : root.sessionState.profile)) || "omaSon"))
                     meta: root.view === "home" ? root.homeMeta()
-                        : (root.view === "create" ? "Pair two replicas"
+                        : (root.view === "create" ? (root.createMode === "folder" ? "Add a folder to a pair" : "Pair two replicas")
                         : (root.view === "record" ? Model.runSummary(root.record) + " · " + Qt.formatDateTime(new Date(root.record.started * 1000), "dd MMM HH:mm") : root.sessionMeta()))
                     foreground: root.foreground
                     fontFamily: root.family
@@ -516,7 +595,7 @@ Panel {
                                 readonly property var last: root.selected ? root.selected.last : null
                                 label: "Last run"
                                 value: last ? Model.runSummary(last) + " · " + Model.relativeTime(last.finished, root.now) : "Never synced"
-                                valueColor: last && (last.phase === "error" || last.phase === "partial") ? root.urgent : root.foreground
+                                valueColor: Model.runProblem(last) ? root.urgent : root.foreground
                             }
                             // Why the last run failed, so it can be fixed before scanning again.
                             Caption {
@@ -526,6 +605,12 @@ Panel {
                                 color: root.urgent
                                 horizontalAlignment: Text.AlignRight
                             }
+                        }
+
+                        Caption {
+                            visible: root.host.notice !== ""
+                            text: Model.glyph.check + "  " + root.host.notice
+                            color: root.accent
                         }
 
                         Button {
@@ -575,8 +660,8 @@ Panel {
                                     required property int index
                                     width: parent.width
                                     rowIndex: 2 + index
-                                    glyphText: Model.statusGlyph(modelData.phase)
-                                    glyphColor: modelData.phase === "error" || modelData.phase === "partial" ? root.urgent : root.foreground
+                                    glyphText: Model.statusGlyph(modelData.phase, modelData.result)
+                                    glyphColor: Model.runProblem(modelData) ? root.urgent : root.foreground
                                     title: Model.runSummary(modelData)
                                     caption: Qt.formatDateTime(new Date(modelData.finished * 1000), "ddd dd MMM · HH:mm")
                                     trailing: Model.relativeTime(modelData.finished, root.now)
@@ -591,25 +676,132 @@ Panel {
                         visible: root.view === "create"
                         width: parent.width
                         spacing: Style.space(8)
+                        // Keys the toggle and pair picker don't use bubble up to here.
+                        Keys.onEscapePressed: root.cancelForm()
 
                         PanelSeparator { foreground: root.foreground }
+
+                        ButtonGroup {
+                            visible: root.pairs.length > 0
+                            options: [{ value: "folder", label: "Add a folder to a pair" }, { value: "pair", label: "New pair" }]
+                            value: root.createMode
+                            foreground: root.foreground
+                            fontFamily: root.family
+                            focusable: true
+                            onChanged: function(value) { root.setCreateMode(value) }
+                        }
+
                         BridgeCard {
                             width: parent.width
-                            leftSide: Model.classify(leftField.text)
-                            rightSide: Model.classify(rightField.text)
+                            leftSide: root.formLeft
+                            rightSide: root.formRight
                             preview: true
                         }
+
+                        // Folder in an existing pair: pair, folder, then name.
+                        Column {
+                            visible: root.createMode === "folder"
+                            width: parent.width
+                            spacing: Style.space(8)
+                            FieldLabel { text: "PAIR" }
+                            Dropdown {
+                                id: pairPicker
+                                width: parent.width
+                                showLabel: false
+                                options: root.pairs.map(function(p) { return { value: p.template, label: p.label } })
+                                value: root.formTemplate
+                                fontFamily: root.family
+                                onChanged: function(value) { root.formTemplate = value; root.suggestName(); root.scheduleCheck() }
+                            }
+                            FieldLabel { text: "FOLDER" }
+                            PathRow {
+                                field: folderField
+                                onBrowse: root.browse("folder")
+                                TextField {
+                                    id: folderField
+                                    width: parent.width
+                                    placeholderText: "Music"
+                                    onTextChanged: { root.suggestName(); root.scheduleCheck() }
+                                    Keys.onPressed: function(event) { root.fieldKey(event, nameField) }
+                                }
+                            }
+                            CheckLine { field: "folder"; value: folderField.text }
+                        }
+
                         FieldLabel { text: "NAME" }
-                        TextField { id: nameField; width: parent.width; placeholderText: "documents"; Keys.onPressed: function(event) { root.fieldKey(event, leftField) } }
-                        FieldLabel { text: "LEFT REPLICA" }
-                        TextField { id: leftField; width: parent.width; placeholderText: "/home/you/Documents"; Keys.onPressed: function(event) { root.fieldKey(event, rightField) } }
-                        FieldLabel { text: "RIGHT REPLICA" }
-                        TextField { id: rightField; width: parent.width; placeholderText: "/run/media/you/Drive/Documents  or  ssh://user@host//path"; Keys.onPressed: function(event) { root.fieldKey(event, null) }; onAccepted: root.saveProfile() }
-                        Caption { text: "Local folders must already exist. SSH uses your agent and known hosts. New profiles keep five backup versions of replaced files." }
+                        TextField {
+                            id: nameField
+                            width: parent.width
+                            placeholderText: root.createMode === "folder" ? "gator-music" : "documents"
+                            onTextEdited: root.nameEdited = text !== ""
+                            onTextChanged: root.scheduleCheck()
+                            Keys.onPressed: function(event) { root.fieldKey(event, root.createMode === "folder" ? ignoreField : leftField) }
+                        }
+                        CheckLine { field: "name"; value: nameField.text }
+
+                        // A new pair: the two roots.
+                        Column {
+                            visible: root.createMode === "pair"
+                            width: parent.width
+                            spacing: Style.space(8)
+                            FieldLabel { text: "LEFT REPLICA" }
+                            PathRow {
+                                field: leftField
+                                onBrowse: root.browse("left")
+                                TextField {
+                                    id: leftField
+                                    width: parent.width
+                                    placeholderText: "/home/you/Documents"
+                                    onTextChanged: { root.suggestName(); root.scheduleCheck() }
+                                    Keys.onPressed: function(event) { root.fieldKey(event, rightField) }
+                                }
+                            }
+                            CheckLine { field: "left"; value: leftField.text }
+                            FieldLabel { text: "RIGHT REPLICA" }
+                            PathRow {
+                                field: rightField
+                                onBrowse: root.browse("right")
+                                TextField {
+                                    id: rightField
+                                    width: parent.width
+                                    placeholderText: "/run/media/you/Drive/Documents  or  ssh://user@host//path"
+                                    onTextChanged: root.scheduleCheck()
+                                    Keys.onPressed: function(event) { root.fieldKey(event, ignoreField) }
+                                }
+                            }
+                            CheckLine { field: "right"; value: rightField.text }
+                        }
+
+                        FieldLabel { text: "IGNORE · OPTIONAL" }
+                        TextField {
+                            id: ignoreField
+                            width: parent.width
+                            placeholderText: "node_modules, *.log, .cache"
+                            onTextChanged: root.scheduleCheck()
+                            Keys.onPressed: function(event) { root.fieldKey(event, null) }
+                            onAccepted: root.saveProfile()
+                        }
+                        CheckLine { field: "ignore"; value: ignoreField.text }
+
+                        Caption {
+                            text: root.createMode === "folder"
+                                ? "Uses the roots and options of " + root.formTemplate + "; its own folder and ignore rules are left out. Patterns match names anywhere in the folder; write Path or Regex rules in full."
+                                : "Local folders must already exist. SSH uses your agent and known hosts. New pairs keep five backup versions of replaced files."
+                        }
                         Row {
                             width: parent.width
                             spacing: Style.space(8)
-                            Button { width: (parent.width - parent.spacing) / 2; text: "Create profile"; bordered: true; focusable: true; fontFamily: root.family; onClicked: root.saveProfile() }
+                            Button {
+                                width: (parent.width - parent.spacing) / 2
+                                text: "Create profile"
+                                bordered: true
+                                focusable: true
+                                enabled: root.canCreate
+                                opacity: enabled ? 1 : 0.55
+                                foreground: enabled ? root.accent : root.foreground
+                                fontFamily: root.family
+                                onClicked: root.saveProfile()
+                            }
                             Button { width: (parent.width - parent.spacing) / 2; text: "Cancel"; bordered: true; focusable: true; fontFamily: root.family; onClicked: root.cancelForm() }
                         }
                     }
@@ -1204,6 +1396,48 @@ Panel {
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
         color: root.dim
+        font.family: root.family
+        font.pixelSize: Style.font.caption
+    }
+
+    // A text field with a Browse… button beside it.
+    component PathRow: Row {
+        id: pathRow
+        property Item field: null
+        default property alias input: fieldBox.data
+        signal browse()
+        width: parent ? parent.width : implicitWidth
+        spacing: Style.space(8)
+        Item {
+            id: fieldBox
+            width: pathRow.width - browseButton.width - pathRow.spacing
+            height: pathRow.field ? pathRow.field.implicitHeight : 0
+        }
+        Button {
+            id: browseButton
+            text: "Browse…"
+            bordered: true
+            focusable: true
+            fontFamily: root.family
+            height: fieldBox.height
+            onClicked: pathRow.browse()
+        }
+    }
+
+    // What the helper found for a field: ✓ exists, ⚠ worth knowing, ✕ blocks creation.
+    component CheckLine: Text {
+        id: checkLine
+        property string field: ""
+        property string value: ""
+        readonly property var result: root.host.checks ? root.host.checks[field] : null
+        readonly property bool current: !!result && result.value === value.trim() && !!result.text
+        visible: current
+        width: parent ? parent.width : implicitWidth
+        leftPadding: Style.space(2)
+        textFormat: Text.PlainText
+        wrapMode: Text.WordWrap
+        text: !current ? "" : ({ ok: Model.glyph.check, warn: Model.glyph.conflict, error: Model.glyph.error, info: Model.glyph.info }[result.status] || "") + "  " + result.text
+        color: !current ? root.dim : (result.status === "error" ? root.urgent : (result.status === "ok" ? root.accent : (result.status === "warn" ? root.foreground : root.dim)))
         font.family: root.family
         font.pixelSize: Style.font.caption
     }
