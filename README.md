@@ -70,9 +70,10 @@ omarchy-shell shell summon io.github.ramoncardena.omason '{}'
    log; the file list is a record of the plan, not a claim that every item
    succeeded.
 
-Closing the popup keeps its session alive. **Stop** asks Unison to stop
-gracefully and waits for its archives to be released. Completed transfers remain
-applied if a sync is stopped. Disabling the plugin closes its helper input and
+Closing the popup keeps its session alive. **Cancel** ends a review; nothing
+has been copied at that point. **Stop sync** (shown only while files are being
+transferred) asks Unison to stop gracefully and waits for its archives to be
+released. Completed transfers remain applied if a sync is stopped. Disabling the plugin closes its helper input and
 also requests a graceful stop. Another monitor's instance cannot start a second
 omaSon session while a review or sync holds the global lock.
 
@@ -92,7 +93,7 @@ preference editor.
 | X / U | Hold the change / restore Unison's suggestion |
 | D | Show or hide Unison's diff for the focused change |
 | G | Sync the shown directions |
-| C / V | Stop the session / show Unison's output |
+| C / V | Cancel the review or stop the sync / show Unison's output |
 | N / R | New profile / scan (again) |
 | Backspace | Leave a finished session, record, or form |
 | Escape / Tab | Close popup / switch Omarchy panel |

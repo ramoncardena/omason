@@ -40,6 +40,9 @@ Panel {
     readonly property string phase: sessionState.phase
     readonly property bool finished: ["complete", "partial", "error", "cancelled"].indexOf(phase) >= 0
     readonly property bool syncing: phase === "syncing" || phase === "cancelling"
+    // Set once a sync has started in this session, so "cancelling" can say Stopping.
+    property bool committing: false
+    onPhaseChanged: if (phase === "syncing") committing = true; else if (phase === "scanning" && !sessionState.items.length) committing = false
     readonly property bool sessionVisible: host.busy || (finished && !!sessionState.run && sessionState.run !== dismissedRun)
     readonly property string view: sessionVisible ? "session" : (creating ? "create" : (record ? "record" : "home"))
     readonly property var shownItems: view === "record" ? (record.items || []) : (view === "session" ? sessionState.items : [])
@@ -139,6 +142,12 @@ Panel {
     function toggleExpand(item) { expandedPath = expandedPath === item.path ? "" : item.path }
     function sync() { if (canSync) send("apply") }
     function stop() { if (host.busy && phase !== "cancelling") send("cancel") }
+    // Unison is held open from scan to confirmation, but until a sync starts
+    // nothing has been copied: that is a cancel, not a stop.
+    function stopLabel() {
+        if (phase === "cancelling") return committing ? "Stopping…" : "Cancelling…"
+        return phase === "syncing" ? "Stop sync" : "Cancel"
+    }
     function done() { if (finished) dismissedRun = sessionState.run }
     function openCreate() {
         if (host.busy) return
@@ -229,7 +238,7 @@ Panel {
             const progress = sessionState.progress
             return "Syncing · " + (progress && progress.bytes ? progress.bytes : (progress ? progress.percent : 0) + "%")
         }
-        if (phase === "cancelling") return "Stopping safely"
+        if (phase === "cancelling") return committing ? "Stopping safely" : "Cancelling"
         const result = sessionState.result
         if (phase === "complete" && !sessionState.items.length) return "Already in sync"
         if ((phase === "complete" || phase === "partial") && result) {
@@ -240,7 +249,7 @@ Panel {
         }
         if (phase === "complete") return "Synced"
         if (phase === "partial") return "Partly synced"
-        if (phase === "cancelled") return "Stopped"
+        if (phase === "cancelled") return committing ? "Stopped" : "Cancelled · nothing copied"
         if (phase === "error") return "Unison failed"
         const changes = tally.total + (tally.total === 1 ? " change" : " changes")
         return tally.unresolved ? changes + " · " + tally.unresolved + (tally.unresolved === 1 ? " needs you" : " need you") : changes
@@ -275,9 +284,9 @@ Panel {
         if (view === "record") return "↑↓ move · ⏎ details · ⌫ back"
         if (view === "create") return "⏎ next field · Esc cancel"
         if (finished) return "R scan again · ⏎ / ⌫ done · V output"
-        if (syncing) return "C stop · V output"
-        if (phase === "warning") return "C stop · V output"
-        return "←→ direction · X hold · U reset · D diff · G sync · C stop"
+        if (syncing) return "C stop sync · V output"
+        if (phase === "warning") return "C cancel · V output"
+        return "←→ direction · X hold · U reset · D diff · G sync · C cancel"
     }
 
     Timer { id: focusDelay; interval: 120; onTriggered: if (root.creating) nameField.forceActiveFocus() }
@@ -345,9 +354,9 @@ Panel {
                         implicitHeight: hero.implicitHeight
                         // Reached from the hero's trailingControl, whose `root` is PanelHero.
                         readonly property string actionGlyph: root.view === "home" ? Model.glyph.added
-                            : (root.view !== "session" ? Model.glyph.back : (root.host.busy ? Model.glyph.stop : Model.glyph.close))
+                            : (root.view !== "session" ? Model.glyph.back : (root.syncing ? Model.glyph.stop : Model.glyph.close))
                         readonly property string actionTip: root.view === "home" ? "New profile"
-                            : (root.view !== "session" ? "Back" : (root.host.busy ? "Stop session" : "Done"))
+                            : (root.view !== "session" ? "Back" : (root.syncing ? "Stop sync" : (root.host.busy ? "Cancel review · nothing is copied" : "Done")))
                         readonly property bool actionEnabled: root.view === "home" ? !root.host.busy && root.host.available
                             : (root.view !== "session" || !root.host.busy || root.phase !== "cancelling")
                         function act() {
@@ -590,7 +599,7 @@ Panel {
                         Caption {
                             // On success the hero says what happened; holding changes isn't a problem either.
                             visible: root.view === "record" || (root.finished && root.shownItems.length > 0
-                                && (root.phase === "error" || root.phase === "cancelled" || !root.sessionState.result || root.sessionState.result.failed > 0))
+                                && (root.phase === "error" || (root.phase === "cancelled" ? root.committing : (!root.sessionState.result || root.sessionState.result.failed > 0))))
                             text: root.view === "record" ? root.record.message + "\nLog: " + root.record.logPath : root.sessionState.message
                             color: root.view === "session" && root.phase !== "complete" ? root.urgent : root.dim
                         }
@@ -688,7 +697,7 @@ Panel {
                             }
                             Button {
                                 width: (parent.width - parent.spacing) / 2
-                                text: root.finished ? "Done" : (root.phase === "cancelling" ? "Stopping…" : "Stop")
+                                text: root.finished ? "Done" : root.stopLabel()
                                 bordered: true
                                 fontFamily: root.family
                                 enabled: root.finished || root.phase !== "cancelling"
@@ -1154,7 +1163,7 @@ Panel {
                 width: parent.width
                 spacing: Style.space(8)
                 Button { width: (parent.width - parent.spacing) / 2; text: warning.firstRun ? "Continue" : "I understand, continue"; bordered: true; fontFamily: root.family; onClicked: root.send("acknowledge") }
-                Button { width: (parent.width - parent.spacing) / 2; text: "Stop"; bordered: true; fontFamily: root.family; onClicked: root.stop() }
+                Button { width: (parent.width - parent.spacing) / 2; text: "Cancel"; bordered: true; fontFamily: root.family; onClicked: root.stop() }
             }
         }
     }
