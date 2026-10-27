@@ -69,6 +69,12 @@ awk '{ if (NR % 23 == 0) print "Day " NR ": rewritten on the laptop, with a much
        if (NR % 64 == 0) { print "  - extra note added after day " NR; print "  - and another one" } }' \
   "$left/notes/journal.md" > "$left/notes/journal.md.new" && mv -- "$left/notes/journal.md.new" "$left/notes/journal.md"
 head -c 120000 /dev/urandom >> "$right/photos/2026/lisbon.jpg"
+# More rows, to check spacing and scrolling (including a very long name).
+printf '# Meeting 28 Oct\n- agenda\n- decisions\n' > "$left/notes/meeting-2026-10-28.md"
+head -c 9000 /dev/urandom >> "$left/invoices/october.pdf"
+head -c 61000 /dev/urandom > "$right/invoices/december.pdf"
+head -c 640000 /dev/urandom > "$right/photos/2026/camera roll export from the drive - weekend in the mountains (edited).jpg"
+printf 'milk\nbread\ncoffee\n' > "$right/notes/shopping-list.md"
 if [[ ${1:-} == --big ]]; then
   mkdir -p -- "$left/videos"
   head -c 1G /dev/urandom > "$left/videos/trip.mp4"
