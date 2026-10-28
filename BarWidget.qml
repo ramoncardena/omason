@@ -22,11 +22,33 @@ BarWidget {
     property string notice: ""
     property string pickField: ""
     property var session: ({ phase: "idle", items: [], current: "", profile: "", message: "Choose a profile to review changes.", details: "", detailsPath: "", tail: "", run: "", totals: {}, progress: null, pending: 0, syncRequested: false })
-    readonly property bool busy: ["scanning", "review", "ready", "warning", "syncing", "cancelling"].indexOf(session.phase) >= 0
-    readonly property bool working: session.phase === "scanning" || session.phase === "syncing" || session.phase === "cancelling"
-    readonly property bool needsAttention: session.phase === "warning" || session.phase === "error"
-        || ((session.phase === "review" || session.phase === "ready") && session.items.some(Model.unresolved))
+    // Keep phase as its own string: QML bindings on fields of a replaced `var`
+    // object are easy to miss; this drives the bar icon reliably.
+    property string phase: "idle"
+    property bool hasUnresolved: false
+    readonly property bool busy: ["scanning", "review", "ready", "warning", "syncing", "cancelling"].indexOf(phase) >= 0
+    readonly property bool working: phase === "scanning" || phase === "syncing" || phase === "cancelling"
+    // Lit after a scan (or a finished sync that needs a look) so the bar shows
+    // that something is waiting, not only when there are conflicts.
+    readonly property bool needsAttention: phase === "warning" || phase === "error"
+        || phase === "review" || phase === "ready" || phase === "partial"
+    readonly property bool attentionUrgent: phase === "error" || phase === "warning" || phase === "partial" || hasUnresolved
+    readonly property string statusGlyph: {
+        if (root.working) return Model.glyph.sync
+        if (phase === "error") return Model.glyph.error
+        if (root.attentionUrgent) return Model.glyph.conflict
+        if (phase === "review" || phase === "ready") return Model.glyph.check
+        return Model.glyph.sync
+    }
     readonly property string helperPath: decodeURIComponent(String(Qt.resolvedUrl("bin/omason")).replace(/^file:\/\//, ""))
+
+    function applySession(data) {
+        const beforeWorking = root.working
+        session = data
+        phase = data.phase || "idle"
+        hasUnresolved = !!(data.items && data.items.some(Model.unresolved))
+        if (beforeWorking && !root.working && root.needsAttention) attentionPulse.restart()
+    }
 
     function request(command, args) {
         if (!backend.running) {
@@ -54,8 +76,8 @@ BarWidget {
                     selectedProfile = recent ? recent.profile : (profiles.length ? profiles[0].name : "")
                 }
             } else if (data.type === "state") {
-                const before = session.phase
-                session = data
+                const before = root.phase
+                root.applySession(data)
                 if (["scanning", "syncing", "cancelling", "review", "ready", "warning"].indexOf(before) >= 0) notifyIfClosed(data)
             } else if (data.type === "profile") {
                 profileDoc = data
@@ -199,20 +221,31 @@ BarWidget {
     function statusText() {
         const s = root.session
         const where = s.profile ? " · " + s.profile : ""
-        if (s.phase === "scanning") return "omaSon · scanning" + where
-        if (s.phase === "warning") return "omaSon · needs confirmation" + where
-        if (s.phase === "review" || s.phase === "ready") return "omaSon · " + s.items.length + " changes to review" + where
-        if (s.phase === "syncing") return "omaSon · syncing" + where + (s.progress ? " · " + s.progress.percent + "%" : "")
-        if (s.phase === "error") return "omaSon · last session failed" + where
+        if (root.phase === "scanning") return "omaSon · scanning" + where
+        if (root.phase === "warning") return "omaSon · needs confirmation" + where
+        if (root.phase === "review" || root.phase === "ready") return "omaSon · " + (s.items ? s.items.length : 0) + " changes to review" + where
+        if (root.phase === "syncing") return "omaSon · syncing" + where + (s.progress ? " · " + s.progress.percent + "%" : "")
+        if (root.phase === "error") return "omaSon · last session failed" + where
+        if (root.phase === "partial") return "omaSon · partly synced" + where
         return "omaSon · Unison"
+    }
+
+    // Flash the icon when a scan/sync finishes so a glance at the bar catches it.
+    SequentialAnimation {
+        id: attentionPulse
+        loops: 4
+        NumberAnimation { target: button; property: "opacity"; to: 0.25; duration: 160 }
+        NumberAnimation { target: button; property: "opacity"; to: 1.0; duration: 160 }
     }
 
     BarIconButton {
         id: button
         anchors.fill: parent
         bar: root.bar
-        text: Model.glyph.sync
+        text: root.statusGlyph
         active: root.needsAttention
+        // Accent for "ready to review"; urgent only when something is wrong.
+        activeColor: root.attentionUrgent ? (root.bar ? root.bar.urgent : Color.urgent) : Color.accent
         tooltipText: root.statusText()
         onPressed: function(mouseButton) { if (mouseButton === Qt.LeftButton) root.toggle() }
         NumberAnimation on textRotation {

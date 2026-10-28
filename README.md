@@ -12,8 +12,10 @@ that looks and feels like the rest of Omarchy.
   `U` restores Unison's suggestion. Conflicts come first.
 - **Read the differences.** A diff preview in the row, and the full diff with
   line numbers when you want it.
-- **Watch it happen.** Rows are ticked off as Unison finishes them, failures
-  are explained, and a notification tells you when a sync ends.
+- **Watch it happen.** The bar icon spins while Unison works, then switches to
+  a check (or a conflict mark) and stays highlighted when a scan is ready for
+  you. Rows are ticked off as transfers finish, and a notification tells you
+  when a sync ends with the panel closed.
 - **Manage profiles.** Create, edit, rename and delete Unison profiles, with
   live checks and Unison's own documentation for every preference.
 
@@ -167,8 +169,8 @@ at any time; the session carries on and is there when you reopen it.
 </p>
 
 When a session ends while the panel is closed, a notification reports the
-result. Clicking it reopens the panel, and the bar icon stays highlighted
-after an error.
+result. Clicking it reopens the panel. The bar icon stays highlighted while a
+review is waiting, and after an error or a partial sync.
 
 ### Create a profile
 
