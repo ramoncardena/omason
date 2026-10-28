@@ -117,6 +117,19 @@ def replica(root):
     return {"root": root, "kind": kind, "name": name, "path": shown, "online": path.is_dir(), "host": HOST}
 
 
+FAT_FILESYSTEMS = {"vfat": "FAT", "msdos": "FAT", "fat": "FAT", "exfat": "exFAT"}
+
+
+def filesystem(path):
+    """The filesystem type holding `path` ('ext4', 'exfat', …), or '' if unknown."""
+    try:
+        out = subprocess.run(["findmnt", "-n", "-o", "FSTYPE", "--target", str(path)],
+                             capture_output=True, text=True, timeout=3)
+        return out.stdout.strip().splitlines()[0] if out.returncode == 0 and out.stdout.strip() else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def replicas(roots):
     result = [replica(r) for r in roots]
     # Two local folders with the same name: add the parent to tell them apart.
@@ -197,7 +210,7 @@ class Bridge:
         for path in sorted(self.unison_dir.glob("*.prf")):
             if path.name.startswith("-") or not path.is_file():
                 continue
-            roots, paths, ignores, label = [], [], 0, path.stem
+            roots, paths, ignores, description, fat = [], [], 0, "", False
             try:
                 for line in path.read_text().splitlines():
                     key, sep, value = line.partition("=")
@@ -209,11 +222,15 @@ class Bridge:
                     elif sep and key == "ignore":
                         ignores += 1
                     elif sep and key == "label":
-                        label = value.strip()
-                profiles.append({"name": path.stem, "label": label, "roots": roots, "replicas": replicas(roots),
-                                 "paths": paths, "ignores": ignores})
+                        description = value.strip()
+                    elif sep and key == "fat":
+                        fat = value.strip().lower() in ("true", "yes", "1")
+                # "label" stays the display name; Unison's own label is a description.
+                profiles.append({"name": path.stem, "label": path.stem, "description": description, "roots": roots,
+                                 "replicas": replicas(roots), "paths": paths, "ignores": ignores, "fat": fat})
             except (OSError, UnicodeError):
-                profiles.append({"name": path.stem, "label": label, "roots": [], "replicas": [], "error": "Cannot read profile"})
+                profiles.append({"name": path.stem, "label": path.stem, "description": "", "roots": [], "replicas": [],
+                                 "paths": [], "ignores": 0, "fat": False, "error": "Cannot read profile"})
         history = []
         for path in sorted(self.state_dir.glob("*.json"), reverse=True)[:50]:
             try:
@@ -268,7 +285,11 @@ class Bridge:
             return {"status": "error", "text": "Use an absolute path, or ssh://user@host//path"}
         info = replica(str(path))
         if path.is_dir():
-            return {"status": "ok", "text": f"Folder exists on drive {info['name']}" if info["kind"] == "removable" else "Folder exists"}
+            fat = FAT_FILESYSTEMS.get(filesystem(path))
+            where = f"Folder exists on drive {info['name']}" if info["kind"] == "removable" else "Folder exists"
+            if fat:
+                return {"status": "info", "text": f"{where} · {fat} drive, so FAT options are on", "fat": True}
+            return {"status": "ok", "text": where}
         if path.exists():
             return {"status": "error", "text": "This is a file, not a folder."}
         if info["kind"] == "removable":
@@ -366,6 +387,10 @@ class Bridge:
         if not NAME.fullmatch(name) or ".." in name:
             raise ValueError("Use a profile name beginning with a letter or number, without slashes or '..'.")
         ignores = ignore_lines(str(request.get("ignore", "")))
+        description = " ".join(str(request.get("description", "")).split())[:200]
+        if description:
+            # Unison's descriptive label for the profile (what its own wizard calls Description).
+            ignores = [f"label = {description}"] + ignores
         if request.get("mode") == "folder":
             note = self.create_in_pair(name, request.get("template"), str(request.get("folder", "")), ignores)
         else:
@@ -387,7 +412,9 @@ class Bridge:
         if roots[0] == roots[1]:
             raise ValueError("The two roots must differ.")
         ignore = "".join(line + "\n" for line in ignores)
-        self.write_profile(name, f"# Created by omaSon\nroot = {roots[0]}\nroot = {roots[1]}\n{ignore}\n# Keep replaced and deleted versions in Unison's backup store.\nbackup = Name *\nmaxbackups = 5\n")
+        # FAT/exFAT cannot store permissions, owners or inode numbers; Unison's fat preference covers that.
+        fat = "\n# One replica is on a FAT or exFAT drive.\nfat = true\n" if request.get("fat") is True else ""
+        self.write_profile(name, f"# Created by omaSon\nroot = {roots[0]}\nroot = {roots[1]}\n{ignore}{fat}\n# Keep replaced and deleted versions in Unison's backup store.\nbackup = Name *\nmaxbackups = 5\n")
         return ""
 
     def create_in_pair(self, name, template, folder, ignores):

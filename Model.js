@@ -284,6 +284,16 @@ function withFolder(replica, folder) {
            path: folder ? base + "/" + folder : replica.path }
 }
 
+// Unison's SSH root: ssh://[user@]host[:port]//abs/path, or /rel/path under
+// the remote home. Empty until a host and a path are given.
+function sshRoot(user, host, path) {
+  user = String(user || "").trim(); host = String(host || "").trim(); path = String(path || "").trim()
+  if (!host || !path) return ""
+  // "/srv/x" keeps its slash, giving ssh://host//srv/x; "docs" or "~/docs" gives ssh://host/docs.
+  var where = path.charAt(0) === "/" ? path : path.replace(/^~\/?/, "")
+  return "ssh://" + (user ? user + "@" : "") + host + "/" + where
+}
+
 // "Music Videos" -> "music-videos": a safe, lower-case profile name part.
 function slug(text) {
   return String(text || "").toLowerCase().replace(/[^a-z0-9_.]+/g, "-").replace(/^[-.]+|-+$/g, "")
@@ -297,7 +307,8 @@ function profileCoverage(profile) {
 // Second line of a picker option; the search matches it too ("ssd", "desktop").
 function profileDescription(profile, nowMs) {
   var left = replicaOf(profile, 0), right = replicaOf(profile, 1)
-  var parts = [left.name + " " + glyph.swap + " " + right.name]
+  var parts = profile.description ? [profile.description] : []
+  parts.push(left.name + " " + glyph.swap + " " + right.name)
   if (profile.paths && profile.paths.length) parts.push(profile.paths.join(", "))
   var offline = offlineReplica(profile)
   if (offline) parts.push(offline.name + " not connected")

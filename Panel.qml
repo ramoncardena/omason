@@ -34,8 +34,16 @@ Panel {
     // Pairs a folder can be added to: shared roots, one folder per profile.
     readonly property var pairs: Model.profilePairs(host.profiles)
     readonly property var formPair: pairs.find(function(p) { return p.template === root.formTemplate }) || null
-    readonly property var formLeft: createMode === "folder" ? Model.withFolder(formPair ? formPair.left : null, folderField.text) : Model.classify(leftField.text)
-    readonly property var formRight: createMode === "folder" ? Model.withFolder(formPair ? formPair.right : null, folderField.text) : Model.classify(rightField.text)
+    readonly property var formLeft: createMode === "folder" ? Model.withFolder(formPair ? formPair.left : null, folderField.text) : Model.classify(leftInput.unisonRoot)
+    readonly property var formRight: createMode === "folder" ? Model.withFolder(formPair ? formPair.right : null, folderField.text) : Model.classify(rightInput.unisonRoot)
+    // FAT: on when a checked root is on a FAT/exFAT drive, unless switched by hand.
+    property bool fatTouched: false
+    property bool fatManual: false
+    readonly property bool fatDetected: ["left", "right"].some(function(side) {
+        const result = root.host.checks ? root.host.checks[side] : null
+        return !!result && !!result.fat && result.value === (side === "left" ? leftInput.unisonRoot : rightInput.unisonRoot)
+    })
+    readonly property bool fatOn: fatTouched ? fatManual : fatDetected
     // Required fields filled, and no live check reporting an error for what's typed.
     readonly property bool canCreate: {
         if (!creating || host.busy) return false
@@ -206,8 +214,11 @@ Panel {
     function openCreate() {
         if (host.busy) return
         record = null
-        for (const field of [folderField, nameField, leftField, rightField, ignoreField]) field.text = ""
+        for (const field of [folderField, nameField, descriptionField, ignoreField]) field.text = ""
+        leftInput.clear()
+        rightInput.clear()
         nameEdited = false
+        fatTouched = false
         pickError = ""
         createMode = pairs.length ? "folder" : "pair"
         const current = pairs.find(function(p) { return p.profiles.indexOf(root.host.selectedProfile) >= 0 })
@@ -228,27 +239,28 @@ Panel {
     function formFields() {
         const fields = { name: nameField.text, ignore: ignoreField.text }
         if (createMode === "folder") fields.folder = folderField.text
-        else { fields.left = leftField.text; fields.right = rightField.text }
+        else { fields.left = leftInput.unisonRoot; fields.right = rightInput.unisonRoot }
         return fields
     }
     function scheduleCheck() { if (creating) checkTimer.restart() }
     // "gator-" + "music" in a pair of gator-* profiles; the folder name otherwise.
     function suggestName() {
         if (nameEdited || !creating) return
-        const source = createMode === "folder" ? folderField.text : leftField.text
+        const source = createMode === "folder" ? folderField.text : leftInput.unisonRoot.replace(/^[a-z]+:\/\/[^/]*\/*/, "")
         const base = Model.slug(source.replace(/\/+$/, "").split("/").pop())
         nameField.text = base ? (createMode === "folder" && formPair ? formPair.prefix : "") + base : ""
     }
     function saveProfile() {
         if (!canCreate) return
-        send("create", Object.assign({ mode: createMode, template: formTemplate }, formFields()))
+        send("create", Object.assign({ mode: createMode, template: formTemplate, description: descriptionField.text,
+                                       fat: createMode === "pair" && fatOn }, formFields()))
     }
     // The folder chooser is a normal window, which would open behind this
     // full-screen panel: the widget closes the panel, runs it, and reopens.
     function browse(field) {
         if (!root.hostWidget) return
         const start = field === "folder" ? (formPair ? formPair.left.root : "")
-            : (field === "left" ? leftField.text : rightField.text) || ""
+            : (field === "left" ? leftInput.unisonRoot : rightInput.unisonRoot) || ""
         const titles = { folder: "Choose a folder inside " + (formPair ? formPair.left.name : "the pair"), left: "Choose the left replica", right: "Choose the right replica" }
         root.hostWidget.browse(field, start, titles[field])
     }
@@ -262,9 +274,9 @@ Panel {
                 folderField.text = path.slice(inside.replace(/\/+$/, "").length + 1)
             }
         } else {
-            (field === "left" ? leftField : rightField).text = path
+            (field === "left" ? leftInput : rightInput).setFolder(path)
         }
-        Qt.callLater(function() { ({ folder: folderField, left: leftField, right: rightField })[field].forceActiveFocus() })
+        Qt.callLater(function() { if (field === "folder") folderField.forceActiveFocus(); else (field === "left" ? leftInput : rightInput).focusFirst() })
     }
     function fieldKey(event, next) {
         if (event.key === Qt.Key_Escape) { cancelForm(); event.accepted = true }
@@ -581,6 +593,14 @@ Panel {
                             }
                         }
 
+                        Caption {
+                            visible: !!root.selected && root.selected.description !== ""
+                            text: root.selected ? root.selected.description : ""
+                            color: root.foreground
+                            opacity: 0.8
+                            font.pixelSize: Style.font.bodySmall
+                        }
+
                         BridgeCard {
                             visible: !!root.selected
                             width: parent.width
@@ -751,41 +771,60 @@ Panel {
                             placeholderText: root.createMode === "folder" ? "gator-music" : "documents"
                             onTextEdited: root.nameEdited = text !== ""
                             onTextChanged: root.scheduleCheck()
-                            Keys.onPressed: function(event) { root.fieldKey(event, root.createMode === "folder" ? ignoreField : leftField) }
+                            Keys.onPressed: function(event) { root.fieldKey(event, descriptionField) }
                         }
                         CheckLine { field: "name"; value: nameField.text }
 
-                        // A new pair: the two roots.
+                        FieldLabel { text: "DESCRIPTION · OPTIONAL" }
+                        TextField {
+                            id: descriptionField
+                            width: parent.width
+                            placeholderText: root.createMode === "folder" ? "Music library, laptop to SSD" : "What this pair keeps in sync"
+                            maximumLength: 200
+                            Keys.onPressed: function(event) {
+                                if (root.createMode === "folder") root.fieldKey(event, ignoreField)
+                                else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { leftInput.focusFirst(); event.accepted = true }
+                                else root.fieldKey(event, null)
+                            }
+                        }
+
+                        // A new pair: the two roots, each a local folder or an SSH host.
                         Column {
                             visible: root.createMode === "pair"
                             width: parent.width
                             spacing: Style.space(8)
-                            FieldLabel { text: "LEFT REPLICA" }
-                            PathRow {
-                                field: leftField
+                            ReplicaInput {
+                                id: leftInput
+                                width: parent.width
+                                title: "LEFT REPLICA"
+                                field: "left"
+                                folderHint: "/home/you/Documents"
+                                onEdited: { root.suggestName(); root.scheduleCheck() }
                                 onBrowse: root.browse("left")
-                                TextField {
-                                    id: leftField
-                                    width: parent.width
-                                    placeholderText: "/home/you/Documents"
-                                    onTextChanged: { root.suggestName(); root.scheduleCheck() }
-                                    Keys.onPressed: function(event) { root.fieldKey(event, rightField) }
-                                }
+                                onDone: rightInput.focusFirst()
                             }
-                            CheckLine { field: "left"; value: leftField.text }
-                            FieldLabel { text: "RIGHT REPLICA" }
-                            PathRow {
-                                field: rightField
+                            ReplicaInput {
+                                id: rightInput
+                                width: parent.width
+                                title: "RIGHT REPLICA"
+                                field: "right"
+                                folderHint: "/run/media/you/Drive/Documents"
+                                onEdited: root.scheduleCheck()
                                 onBrowse: root.browse("right")
-                                TextField {
-                                    id: rightField
-                                    width: parent.width
-                                    placeholderText: "/run/media/you/Drive/Documents  or  ssh://user@host//path"
-                                    onTextChanged: root.scheduleCheck()
-                                    Keys.onPressed: function(event) { root.fieldKey(event, ignoreField) }
-                                }
+                                onDone: ignoreField.forceActiveFocus()
                             }
-                            CheckLine { field: "right"; value: rightField.text }
+                            Toggle {
+                                width: parent.width
+                                label: "FAT or exFAT drive"
+                                description: root.fatDetected && !root.fatTouched
+                                    ? "Detected. Skips permissions, symlinks and letter-case differences, which these drives can't store."
+                                    : "For USB sticks and SD cards: skips permissions, symlinks and letter-case differences."
+                                checked: root.fatOn
+                                foreground: root.foreground
+                                accent: root.accent
+                                fontFamily: root.family
+                                onClicked: { root.fatManual = !root.fatOn; root.fatTouched = true }
+                            }
                         }
 
                         FieldLabel { text: "IGNORE · OPTIONAL" }
@@ -800,9 +839,10 @@ Panel {
                         CheckLine { field: "ignore"; value: ignoreField.text }
 
                         Caption {
+                            readonly property var template: root.profileNamed(root.formTemplate)
                             text: root.createMode === "folder"
-                                ? "Uses the roots and options of " + root.formTemplate + "; its own folder and ignore rules are left out. Patterns match names anywhere in the folder; write Path or Regex rules in full."
-                                : "Local folders must already exist. SSH uses your agent and known hosts. New pairs keep five backup versions of replaced files."
+                                ? "Uses the roots and options of " + root.formTemplate + (template && template.fat ? ", including its FAT options" : "") + "; its own folder and ignore rules are left out. Patterns match names anywhere in the folder; write Path or Regex rules in full."
+                                : "Local folders must already exist. SSH uses your agent and known hosts, and needs Unison on the host. New pairs keep five backup versions of replaced files."
                         }
                         Row {
                             width: parent.width
@@ -1414,6 +1454,83 @@ Panel {
         color: root.dim
         font.family: root.family
         font.pixelSize: Style.font.caption
+    }
+
+    // One replica of a new pair: a local folder (typed or browsed) or an SSH
+    // host, user and path, composed into Unison's ssh://user@host//path root.
+    component ReplicaInput: Column {
+        id: replicaInput
+        property string title: ""
+        property string field: ""
+        property string folderHint: ""
+        property string kind: "folder"
+        readonly property string unisonRoot: kind === "ssh" ? Model.sshRoot(userField.text, hostField.text, remotePath.text) : localPath.text.trim()
+        signal edited()
+        signal browse()
+        signal done()
+        spacing: Style.space(8)
+
+        function clear() { kind = "folder"; for (const f of [localPath, hostField, userField, remotePath]) f.text = "" }
+        function focusFirst() { (kind === "ssh" ? hostField : localPath).forceActiveFocus() }
+        function setFolder(path) { kind = "folder"; localPath.text = path }
+        onUnisonRootChanged: edited()
+
+        Item {
+            width: parent.width
+            implicitHeight: Math.max(replicaTitle.implicitHeight, kindPicker.implicitHeight)
+            FieldLabel { id: replicaTitle; text: replicaInput.title; anchors.verticalCenter: parent.verticalCenter }
+            ButtonGroup {
+                id: kindPicker
+                anchors.right: parent.right
+                options: [{ value: "folder", label: "Folder" }, { value: "ssh", label: "SSH host" }]
+                value: replicaInput.kind
+                foreground: root.foreground
+                fontFamily: root.family
+                fontSize: Style.font.bodySmall
+                focusable: true
+                onChanged: function(value) { replicaInput.kind = value; Qt.callLater(replicaInput.focusFirst) }
+            }
+        }
+        PathRow {
+            visible: replicaInput.kind === "folder"
+            field: localPath
+            onBrowse: replicaInput.browse()
+            TextField {
+                id: localPath
+                width: parent.width
+                placeholderText: replicaInput.folderHint
+                Keys.onPressed: function(event) { root.fieldKey(event, null); if (!event.accepted && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) { replicaInput.done(); event.accepted = true } }
+            }
+        }
+        Row {
+            visible: replicaInput.kind === "ssh"
+            width: parent.width
+            spacing: Style.space(8)
+            TextField {
+                id: hostField
+                width: (parent.width - parent.spacing) * 0.6
+                placeholderText: "Host · nas.local or nas:2222"
+                Keys.onPressed: function(event) { root.fieldKey(event, userField) }
+            }
+            TextField {
+                id: userField
+                width: (parent.width - parent.spacing) * 0.4
+                placeholderText: "User · optional"
+                Keys.onPressed: function(event) { root.fieldKey(event, remotePath) }
+            }
+        }
+        TextField {
+            id: remotePath
+            visible: replicaInput.kind === "ssh"
+            width: parent.width
+            placeholderText: "Path · /srv/backup, or docs for ~/docs"
+            Keys.onPressed: function(event) { root.fieldKey(event, null); if (!event.accepted && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) { replicaInput.done(); event.accepted = true } }
+        }
+        Caption {
+            visible: replicaInput.kind === "ssh" && replicaInput.unisonRoot !== ""
+            text: "Unison root: " + replicaInput.unisonRoot
+        }
+        CheckLine { field: replicaInput.field; value: replicaInput.unisonRoot }
     }
 
     // A text field with a Browse… button beside it.

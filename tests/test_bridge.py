@@ -407,6 +407,19 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(self.apply(), "complete")
         self.assertTrue((self.right / "Music" / "song.mp3").exists())
 
+    def test_description_and_fat_in_new_pair(self):
+        self.command("create", name="usb", left=str(self.left), right=str(self.right),
+                     description="  Photos to the\nUSB stick ", fat=True, ignore="")
+        text = (self.config / "usb.prf").read_text()
+        self.assertIn("label = Photos to the USB stick\n", text)
+        self.assertIn("fat = true\n", text)
+        self.events.clear()
+        self.command("catalog")
+        usb = next(p for p in next(e for e in self.events if e["type"] == "catalog")["profiles"] if p["name"] == "usb")
+        self.assertEqual((usb["label"], usb["description"], usb["fat"]), ("usb", "Photos to the USB stick", True))
+        self.bridge.start("usb")
+        self.assertIn(self.wait({"review", "complete", "error"}), ("review", "complete"))
+
     def test_root_checks(self):
         (self.root / "file").write_text("x")
         results = self.check(left=str(self.left), right=str(self.root / "missing"))
@@ -415,6 +428,11 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(self.check(left="relative/path")["left"]["status"], "error")
         self.assertEqual(self.check(right="ssh://me@box//srv")["right"]["status"], "info")
         self.assertIn("not mounted", self.check(right="/run/media/nobody/NO_SUCH_DRIVE/x")["right"]["text"])
+        with patch.object(module, "filesystem", return_value="exfat"):
+            fat = self.check(right=str(self.right))["right"]
+        self.assertEqual((fat["status"], fat["fat"]), ("info", True))
+        self.assertIn("exFAT drive, so FAT options are on", fat["text"])
+        self.assertNotIn("fat", self.check(right=str(self.right))["right"])
 
     def test_catalog_replicas_and_last_run(self):
         (self.left / "one").write_text("one")

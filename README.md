@@ -58,9 +58,18 @@ omarchy-shell shell summon io.github.ramoncardena.omason '{}'
      same prefix. If that profile uses `mountpoint` (Unison's guard against an
      unmounted drive), the folder must exist on both sides, so omaSon creates
      an empty one where it is missing, and says so before you create.
-   - **New pair**: two existing local folders, or a local folder and an SSH
-     root such as `ssh://user@host//absolute/path`. New pairs enable Unison
-     backups and keep five versions.
+   - **New pair of replicas**: each side is a local **Folder** (typed or
+     browsed) or an **SSH host**, given as host (optionally `host:port`),
+     user and path; omaSon builds Unison's `ssh://user@host//absolute/path`
+     root (or `ssh://host/dir` for a path under the remote home). New pairs
+     enable Unison backups and keep five versions. **FAT or exFAT drive**
+     sets Unison's `fat` option (no permissions, symlinks or case-only
+     renames); it switches on by itself when a folder is detected on such a
+     drive. Plain TCP sockets are not offered because they are unencrypted.
+
+   Both modes take an optional **Description**, written as Unison's `label`
+   (what Unison's own wizard calls Description). Profiles are listed by name,
+   with the description beside them, and the picker's search matches it.
 
    Each field is checked as you type: whether a folder exists, a drive is
    mounted, a folder is already synced by another profile, or a name is
