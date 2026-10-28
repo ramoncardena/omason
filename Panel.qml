@@ -481,15 +481,25 @@ Panel {
             } else if (cursor < plan.rows.length) {
                 item = planRepeater.itemAt(plan.rowEntry[cursor])
             }
-            if (!item) return
-            const margin = Style.space(8)
-            const top = item.mapToItem(panelFlick.contentItem, 0, 0).y
-            const bottom = top + item.height
-            const maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
-            if (top < panelFlick.contentY + margin) panelFlick.contentY = Math.max(0, top - margin)
-            else if (bottom > panelFlick.contentY + panelFlick.height - margin)
-                panelFlick.contentY = Math.min(maxY, Math.max(0, top - margin), bottom + margin - panelFlick.height)
+            scrollIntoView(item)
         })
+    }
+    function scrollIntoView(item) {
+        if (!item) return
+        const margin = Style.space(8)
+        const top = item.mapToItem(panelFlick.contentItem, 0, 0).y
+        const bottom = top + item.height
+        const maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
+        if (top < panelFlick.contentY + margin) panelFlick.contentY = Math.max(0, top - margin)
+        else if (bottom > panelFlick.contentY + panelFlick.height - margin)
+            panelFlick.contentY = Math.min(maxY, Math.max(0, top - margin), bottom + margin - panelFlick.height)
+    }
+    // Tabbing through a form keeps the focused field on screen.
+    readonly property Item focusedItem: keyCatcher.Window.activeFocusItem
+    onFocusedItemChanged: {
+        if (view !== "edit" && view !== "create") return
+        for (let item = focusedItem; item; item = item.parent)
+            if (item === content) { const target = focusedItem; Qt.callLater(function() { root.scrollIntoView(target) }); return }
     }
 
     // ---- text for the hero and footer ----------------------------------
@@ -707,11 +717,12 @@ Panel {
                 boundsBehavior: Flickable.StopAtBounds
                 flickableDirection: Flickable.VerticalFlick
                 interactive: contentHeight > height
-                Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+                Controls.ScrollBar.vertical: Controls.ScrollBar { id: panelBar; policy: Controls.ScrollBar.AsNeeded }
 
                 Column {
                     id: content
-                    width: panelFlick.width
+                    // Keep fields and switches clear of the scroll bar while there is something to scroll.
+                    width: panelFlick.width - (panelFlick.contentHeight > panelFlick.height ? panelBar.width + Style.space(6) : 0)
                     spacing: Style.space(12)
 
                     // ---- home ----------------------------------------------
@@ -1744,11 +1755,11 @@ Panel {
             clip: true
             boundsBehavior: Flickable.StopAtBounds
             onMovementEnded: output.following = atYEnd
-            Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+            Controls.ScrollBar.vertical: Controls.ScrollBar { id: logBar; policy: Controls.ScrollBar.AsNeeded }
 
             TextEdit {
                 id: logText
-                width: logFlick.width
+                width: logFlick.width - (logFlick.contentHeight > logFlick.height ? logBar.width + Style.space(4) : 0)
                 readOnly: true
                 selectByMouse: true
                 textFormat: TextEdit.PlainText
@@ -1827,7 +1838,7 @@ Panel {
             contentHeight: diffColumn.implicitHeight
             clip: true
             boundsBehavior: Flickable.StopAtBounds
-            Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+            Controls.ScrollBar.vertical: Controls.ScrollBar { id: diffBar; policy: Controls.ScrollBar.AsNeeded }
             // Keep "change N of M" in step with manual scrolling.
             onContentYChanged: {
                 for (let i = viewer.hunkCount - 1; i >= 0; i--) {
@@ -1857,7 +1868,7 @@ Panel {
 
             Column {
                 id: diffColumn
-                width: diffFlick.width
+                width: diffFlick.width - (diffFlick.contentHeight > diffFlick.height ? diffBar.width + Style.space(4) : 0)
                 spacing: Style.space(10)
 
                 Text {
