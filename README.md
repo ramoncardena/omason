@@ -20,22 +20,36 @@ that looks and feels like the rest of Omarchy.
 Unison does the actual work: omaSon drives Unison's text interface and never
 copies your files itself.
 
+## Requirements
+
+- Omarchy 4 (Quattro) with its bundled Quickshell plugin host
+- Python 3 (ships with Omarchy)
+- [Unison](https://github.com/bcpierce00/unison) — **not** bundled with Omarchy.
+  Install it from your distribution (on Omarchy/Arch the package name is
+  `unison`)
+- For **Browse…** (folder chooser): the XDG desktop portal and `python-gobject`
+  (both ship with Omarchy)
+- For SSH replicas: keys loaded in the shell's SSH agent, the host already in
+  `known_hosts`, and a compatible Unison on the remote. SSH replicas are
+  supported but have not yet been tested against a real remote host.
+
+No root privileges, packages beyond Unison, services, or installers are needed
+to run the plugin itself.
+
 ## Install
 
-omaSon needs Omarchy's shell (Quickshell), Python 3 and `unison`. For SSH
-replicas, the shell's SSH agent must hold the keys, the host must already be
-in `known_hosts`, and the host needs a compatible Unison.
-
-From a checkout:
+Install the `unison` package first (see Requirements), then add the plugin:
 
 ```bash
-./scripts/install.sh
+omarchy plugin add https://github.com/ramoncardena/omason.git --enable
 ```
 
-This copies the plugin to
-`~/.config/omarchy/plugins/io.github.ramoncardena.omason/`, rescans Omarchy's
-plugins and adds the widget to the right of the bar. It refuses to overwrite a
-different installation, and nothing is scanned or synced during installation.
+For local development, copy the working tree into the plugins folder (the
+shell rejects symlinks) and enable it:
+
+```bash
+scripts/dev-sync.sh
+```
 
 Open the panel from the bar icon, or with:
 
@@ -264,33 +278,73 @@ None of this works on a profile while it is being reviewed or synced.
   background syncing.
 - **SSH never prompts.** It runs with `BatchMode`, existing host keys and a
   15-second connection timeout, so a failed login shows up in the output
-  instead of waiting at an invisible password prompt. SSH replicas are
-  supported but have not yet been tested against a real remote host.
+  instead of waiting at an invisible password prompt.
 - **Tested with Unison 2.54.0** in its English, uncoloured text interface.
   Prompts omaSon doesn't recognise get no automatic answer, and a scan that
   stops producing output times out after two minutes. A future Unison may
   change its text interface and need an update here.
-- **Your data stays local.** Logs and session records live in
-  `$XDG_STATE_HOME/omason/` (normally `~/.local/state/omason/`), readable only
-  by you. Logs are capped at about 8 MB each and the newest 50 sessions are
-  kept. Records hold paths and planned actions, not file contents, but diffs
-  can appear in logs. Previous versions of edited profiles are in
-  `profile-backups/`, and deleted profiles in `deleted-profiles/`.
-- **One session at a time.** With the widget on several monitors, only one
-  instance can review or sync at once.
+- **One helper for every monitor.** The bar runs one widget per screen; they
+  share a single helper over a local socket so every panel sees the same
+  session and catalog.
 
-To remove the widget:
+### IPC
+
+```bash
+omarchy-shell shell summon io.github.ramoncardena.omason '{}'
+omarchy-shell shell hide io.github.ramoncardena.omason
+omarchy-shell shell toggle io.github.ramoncardena.omason
+```
+
+## Safety and privacy
+
+Like every Omarchy plugin, omaSon runs unsandboxed as your user. Inspect the
+source before installing. What it does:
+
+- **Network:** only when a Unison profile uses an SSH (or socket) root — then
+  Unison connects to that host. No telemetry and no other outbound requests.
+- **Reads:** Unison profiles under `~/.unison` (or `$UNISON`), and the replica
+  folders those profiles name (local paths and, for SSH, whatever Unison
+  fetches).
+- **Writes:** `$XDG_STATE_HOME/omason/` (normally `~/.local/state/omason/`),
+  mode `0700`: session logs (capped at about 8 MB each), the newest 50 run
+  records, `profile-backups/`, `deleted-profiles/`, and a short-lived serve
+  lock/socket under `$XDG_RUNTIME_DIR`. Creating or editing a profile can
+  create empty mountpoint folders on local replicas when Unison requires
+  them. Unison itself still writes its own archives and backups under
+  `~/.unison` when you sync.
+- **Processes:** a long-running `python3 bin/omason serve` helper (one shared
+  instance), Unison for each scan/sync, a short-lived helper for the portal
+  folder chooser, and `omarchy-notification-send` when a session ends while
+  the panel is closed. Preferences that run external programs (`diff`,
+  `merge`, `sshcmd`, …) cannot be added or changed in the editor; omaSon
+  forces safe values for them on the Unison command line.
+- No root, no services, no background daemons beyond the shell and that
+  helper, and no telemetry.
+
+## Remove
 
 ```bash
 omarchy plugin remove io.github.ramoncardena.omason --yes
 ```
 
-Your profiles, Unison's archives and backups, and omaSon's history are kept.
+Your Unison profiles, Unison's archives and backups, and omaSon's state folder
+(`$XDG_STATE_HOME/omason/`) are left in place. Remove the state folder
+yourself if you no longer want the history.
 
 ## Development
 
+```
+manifest.json      Omarchy plugin manifest (bar-widget)
+BarWidget.qml      entry point: state, helper process, IPC, bar icon
+Panel.qml          the popup (loaded by BarWidget.qml)
+Model.js           pure presentation helpers
+bin/omason         Unison text-UI bridge; JSON lines on stdin/stdout
+scripts/check.sh   integration tests, plugin validation, qmllint
+scripts/dev-sync.sh  copy into ~/.config/omarchy/plugins and enable
+```
+
 ```bash
-./scripts/check.sh   # integration tests with real Unison, plugin validation, qmllint
+./scripts/check.sh
 ```
 
 The tests run real Unison on throwaway folders and never touch your profiles,
@@ -312,3 +366,7 @@ The plugin follows the [Omarchy plugin contract](https://plugins.omarchy.org/dev
 and the adapter was checked against Unison's
 [text UI source](https://github.com/bcpierce00/unison/blob/v2.54.0/src/uitext.ml).
 [The design notes](docs/design.md) describe the helper's protocol.
+
+## License
+
+[MIT](LICENSE)

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copy the working tree into the Omarchy plugins dir (the shell rejects
+# symlinks) and enable the widget. Prefer `omarchy plugin add` for normal use.
+
 set -euo pipefail
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -32,7 +35,7 @@ else
     fi
     echo "The same plugin files are already installed; retrying activation."
   else
-    staging=$(mktemp -d "$plugin_root/.omason-install.XXXXXXXX")
+    staging=$(mktemp -d "$plugin_root/.omason-dev.XXXXXXXX")
     trap 'rm -rf -- "$staging"' EXIT
     mkdir -p -- "$staging/bin"
     cp -- "$source_dir/manifest.json" "$source_dir/BarWidget.qml" "$source_dir/Panel.qml" "$source_dir/Model.js" "$source_dir/README.md" "$source_dir/LICENSE" "$staging/"
