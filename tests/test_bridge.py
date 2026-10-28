@@ -420,6 +420,79 @@ class IntegrationTests(unittest.TestCase):
         self.bridge.start("usb")
         self.assertIn(self.wait({"review", "complete", "error"}), ("review", "complete"))
 
+    def load(self, name):
+        self.events.clear()
+        self.command("profile", name=name)
+        return next(e for e in self.events if e["type"] == "profile")
+
+    def test_edit_profile_keeps_everything_else_verbatim(self):
+        self.profile.write_text(f"# My profile\n\nroot = {self.left}\nroot  =  {self.right}\n"
+                                "include common\ntimes=true\nignore = Name *.tmp\n")
+        os.chmod(self.profile, 0o644)
+        doc = self.load("test")
+        kinds = [(l["kind"], l["key"]) for l in doc["lines"]]
+        self.assertEqual(kinds, [("comment", ""), ("blank", ""), ("pref", "root"), ("pref", "root"),
+                                 ("other", ""), ("pref", "times"), ("pref", "ignore")])
+        lines = [dict(l) for l in doc["lines"]]
+        lines[5]["value"] = "false"                       # change
+        del lines[6]                                      # delete the ignore
+        lines.append({"orig": None, "kind": "pref", "key": "maxbackups", "value": "7"})  # add
+        self.command("save", name="test", hash=doc["hash"], lines=lines)
+        saved = next(e for e in self.events if e["type"] == "saved")
+        self.assertEqual(self.profile.read_text(),
+                         f"# My profile\n\nroot = {self.left}\nroot  =  {self.right}\ninclude common\ntimes = false\nmaxbackups = 7\n")
+        self.assertEqual(self.profile.stat().st_mode & 0o777, 0o644)
+        self.assertIn("times=true", Path(saved["backup"]).read_text())
+
+    def test_edit_adds_guarded_folder_on_both_sides(self):
+        (self.left / "Docs").mkdir(); (self.right / "Docs").mkdir(); (self.left / "Music").mkdir()
+        self.profile.write_text(f"root = {self.left}\nroot = {self.right}\npath = Docs\nmountpoint = Docs\n")
+        self.events.clear()
+        self.command("check", fields={"folder": "Docs"}, template="test", editing=True)
+        own = next(e for e in self.events if e["type"] == "check")["results"]["folder"]
+        self.assertEqual(own["status"], "ok")  # its own folder is not "already synced by test"
+        doc = self.load("test")
+        lines = [dict(l) for l in doc["lines"]] + [{"orig": None, "kind": "pref", "key": "path", "value": "Music"},
+                                                  {"orig": None, "kind": "pref", "key": "mountpoint", "value": "Music"}]
+        self.command("save", name="test", hash=doc["hash"], lines=lines)
+        saved = next(e for e in self.events if e["type"] == "saved")
+        self.assertIn("Music on right replica", saved["note"])
+        self.assertTrue((self.right / "Music").is_dir())
+        (self.left / "Music" / "a").write_text("a")
+        self.assertEqual(self.scan(), "review")
+
+    def test_edit_profile_refuses_bad_saves(self):
+        doc = self.load("test")
+        def save(lines, digest=doc["hash"]):
+            self.command("save", name="test", hash=digest, lines=lines)
+        base = [dict(l) for l in doc["lines"]]
+        with self.assertRaisesRegex(ValueError, "no preference called"):
+            save(base + [{"orig": None, "kind": "pref", "key": "nonsense", "value": "1"}])
+        with self.assertRaisesRegex(ValueError, "true or false"):
+            save(base + [{"orig": None, "kind": "pref", "key": "times", "value": "maybe"}])
+        with self.assertRaisesRegex(ValueError, "a number"):
+            save(base + [{"orig": None, "kind": "pref", "key": "maxbackups", "value": "lots"}])
+        with self.assertRaisesRegex(ValueError, "exactly two roots"):
+            save(base[:1])
+        with self.assertRaisesRegex(ValueError, "changed on disk"):
+            save(base, digest="0" * 64)
+        with self.assertRaisesRegex(ValueError, "single line"):
+            save(base + [{"orig": None, "kind": "pref", "key": "label", "value": "a\nroot = /"}])
+        original = self.profile.read_text()
+        (self.left / "one").write_text("one")
+        self.scan()
+        with self.assertRaisesRegex(ValueError, "being reviewed"):
+            save(base)
+        self.assertEqual(self.profile.read_text(), original)
+
+    def test_preference_catalog(self):
+        self.events.clear()
+        self.command("prefs")
+        prefs = {p["name"]: p for p in next(e for e in self.events if e["type"] == "prefs")["prefs"]}
+        self.assertEqual((prefs["auto"]["type"], prefs["maxbackups"]["type"], prefs["ignore"]["list"]), ("bool", "int", True))
+        self.assertIn("non-conflicting", prefs["auto"]["long"])
+        self.assertGreater(len(prefs), 90)
+
     def test_root_checks(self):
         (self.root / "file").write_text("x")
         results = self.check(left=str(self.left), right=str(self.root / "missing"))

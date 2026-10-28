@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import codecs
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -117,6 +118,58 @@ def replica(root):
     return {"root": root, "kind": kind, "name": name, "path": shown, "online": path.is_dir(), "host": HOST}
 
 
+# Preferences that may appear several times; each line adds a value.
+LIST_PREFS = {"root", "path", "mountpoint"}
+HELP_LINE = re.compile(r"^\s+-([A-Za-z][A-Za-z0-9_-]*)(?: (xxx|n))?\s+(\S.*)$")
+MANUAL_ENTRY = re.compile(r"^   ([A-Za-z][A-Za-z0-9_-]*)(?: (xxx|n))?\s*$")
+
+
+def preference_catalog():
+    """Unison's preferences: name, type, short and long description, from the installed Unison."""
+    def run(*args):
+        try:
+            return subprocess.run(["unison", *args], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+    prefs = {}
+    for line in run("-help").splitlines():
+        match = HELP_LINE.match(line)
+        if not match:
+            continue
+        name, arg, short = match.groups()
+        kind = {"xxx": "string", "n": "int"}.get(arg, "bool")
+        many = kind == "string" and (name in LIST_PREFS or short.startswith("add "))
+        prefs[name] = {"name": name, "type": kind, "list": many, "short": short.strip(), "long": ""}
+    # Long descriptions: the manual's reference, "   name [xxx|n]" then indented paragraphs.
+    current, body = None, []
+    manual = run("-doc", "all").splitlines()
+    # The section repeats the -help summary first; the reference starts at its first entry.
+    start = next((i for i, l in enumerate(manual) if "Here are all the preferences supported by Unison" in l), len(manual))
+    start = next((i for i in range(start, len(manual))
+                  if MANUAL_ENTRY.match(manual[i]) and MANUAL_ENTRY.match(manual[i]).group(1) in prefs), len(manual))
+    for line in manual[start:]:
+        if line and not line.startswith(" "):
+            break  # next top-level section (Profiles)
+        entry = MANUAL_ENTRY.match(line)
+        if entry and entry.group(1) in prefs:
+            if current:
+                prefs[current]["long"] = " ".join(" ".join(body).split())
+            current, body = entry.group(1), []
+        elif current:
+            body.append(line.strip())
+    if current:
+        prefs[current]["long"] = " ".join(" ".join(body).split())
+    return sorted(prefs.values(), key=lambda p: p["name"])
+
+
+def valid_value(kind, value):
+    if kind == "bool":
+        return value.lower() in ("true", "false", "yes", "no")
+    if kind == "int":
+        return re.fullmatch(r"-?(0o[0-7]+|0x[0-9a-fA-F]+|\d+)", value) is not None
+    return True
+
+
 FAT_FILESYSTEMS = {"vfat": "FAT", "msdos": "FAT", "fat": "FAT", "exfat": "exFAT"}
 
 
@@ -128,6 +181,10 @@ def filesystem(path):
         return out.stdout.strip().splitlines()[0] if out.returncode == 0 and out.stdout.strip() else ""
     except (OSError, subprocess.SubprocessError):
         return ""
+
+
+def glob_escape(text):
+    return re.sub(r"([*?\[])", r"[\1]", text)
 
 
 def replicas(roots):
@@ -187,6 +244,7 @@ class Bridge:
         self.run_id = ""
         self.last_snapshot = 0.0
         self.dirty = False
+        self.prefs = None
         self.state = self.fresh("idle", "", "Choose a profile to review changes.")
 
     def fresh(self, phase, profile, message):
@@ -261,6 +319,101 @@ class Bridge:
             rows.append((key.strip() if sep else "", value.strip(), line))
         return rows
 
+    # ---- profile editing --------------------------------------------------
+
+    def load_profile(self, name):
+        """Every line of a profile, so the panel can edit preferences and keep the rest verbatim."""
+        self.read_profile(name)  # validates the name
+        text = self.profile_file(name).read_text()
+        lines = []
+        for index, raw in enumerate(text.splitlines()):
+            stripped = raw.strip()
+            key, sep, value = raw.partition("=")
+            if not stripped:
+                kind = "blank"
+            elif stripped.startswith("#"):
+                kind = "comment"
+            elif sep and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", key.strip()):
+                kind = "pref"
+            else:
+                kind = "other"  # include / source lines and anything unusual
+            lines.append({"orig": index, "kind": kind, "key": key.strip() if kind == "pref" else "",
+                          "value": value.strip() if kind == "pref" else "", "raw": raw})
+        self.emit({"type": "profile", "name": name, "hash": hashlib.sha256(text.encode()).hexdigest(), "lines": lines})
+
+    def save_profile(self, request):
+        name = request.get("name")
+        self.read_profile(name)
+        if self.child and self.state["profile"] == name:
+            raise ValueError("This profile is being reviewed or synced. Finish or cancel that first.")
+        path = self.profile_file(name)
+        text = path.read_text()
+        if hashlib.sha256(text.encode()).hexdigest() != request.get("hash"):
+            raise ValueError("The profile changed on disk since it was opened. Reopen it to edit.")
+        if self.prefs is None:
+            self.prefs = preference_catalog()
+        known = {p["name"]: p for p in self.prefs}
+        original = text.splitlines()
+        out = []
+        for entry in request.get("lines") or []:
+            orig = entry.get("orig")
+            if isinstance(orig, int) and not 0 <= orig < len(original):
+                raise ValueError("The edit refers to a line that does not exist.")
+            if entry.get("kind") != "pref":
+                if not isinstance(orig, int):
+                    raise ValueError("Only preferences can be added.")
+                out.append(original[orig])  # comments, blanks, include lines: untouched
+                continue
+            key, value = str(entry.get("key", "")).strip(), str(entry.get("value", "")).strip()
+            if isinstance(orig, int):
+                old_key, sep, old_value = original[orig].partition("=")
+                if sep and old_key.strip() == key and old_value.strip() == value:
+                    out.append(original[orig])  # unchanged: keep its exact spelling
+                    continue
+            if any(c in key + value for c in "\r\n\x00"):
+                raise ValueError(f"{key}: values must be a single line.")
+            if key not in known:
+                raise ValueError(f"Unison has no preference called \"{key}\".")
+            if not valid_value(known[key]["type"], value):
+                raise ValueError(f"{key} needs {'true or false' if known[key]['type'] == 'bool' else 'a number'}, not \"{value}\".")
+            out.append(f"{key} = {value}")
+        roots = [l for l in out if l.partition("=")[0].strip() == "root"]
+        before = [l for l in original if l.partition("=")[0].strip() == "root"]
+        if len(before) == 2 and len(roots) != 2:
+            raise ValueError("A profile needs exactly two roots.")
+        # Keep the previous version, then replace the file in one step.
+        backups = self.state_dir / "profile-backups"
+        backups.mkdir(mode=0o700, exist_ok=True)
+        backup = backups / f"{name}.{time.strftime('%Y%m%dT%H%M%S')}.prf"
+        shutil.copy2(path, backup)
+        for old in sorted(backups.glob(f"{glob_escape(name)}.*.prf"))[:-10]:
+            old.unlink(missing_ok=True)
+        temp = path.with_name(f".{path.name}.omason-{uuid.uuid4().hex[:8]}")
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, path.stat().st_mode & 0o777)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("\n".join(out) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp, path)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
+        # A folder added under mountpoint must exist on both sides before Unison runs, as when creating.
+        values = lambda lines, key: [l.partition("=")[2].strip() for l in lines if l.partition("=")[0].strip() == key]
+        added = set(values(out, "path")) - set(values(original, "path"))
+        created = []
+        for folder in sorted(added & set(values(out, "mountpoint"))):
+            for root in values(out, "root"):
+                info = replica(root)
+                target = Path(root).expanduser() / folder
+                if info["kind"] in ("local", "removable") and info["online"] and not target.exists():
+                    target.mkdir(parents=True)
+                    created.append(f"{folder} on {info['name']}")
+        note = f"Created an empty {', '.join(created)}." if created else ""
+        self.emit({"type": "saved", "profile": name, "backup": str(backup), "note": note})
+        self.catalog()
+
     def check_name(self, name):
         if not name:
             return {"status": "", "text": ""}
@@ -312,7 +465,7 @@ class Bridge:
             sides.append({**info, "exists": target.is_dir() if local and info["online"] else None, "target": target})
         return rows, roots, sides
 
-    def check_folder(self, folder, template):
+    def check_folder(self, folder, template, exclude=None):
         folder = folder.strip().strip("/")
         if not folder:
             return {"status": "", "text": ""}
@@ -326,7 +479,7 @@ class Bridge:
                 other = [(k.strip(), v.strip()) for k, _, v in (line.partition("=") for line in path.read_text().splitlines())]
             except (OSError, UnicodeError):
                 continue
-            if [v for k, v in other if k == "root"] != roots:
+            if path.stem == exclude or [v for k, v in other if k == "root"] != roots:
                 continue
             paths = [v.strip("/") for k, v in other if k == "path"]
             if not paths:
@@ -364,7 +517,8 @@ class Bridge:
                 elif field in ("left", "right"):
                     result = self.check_root(value)
                 elif field == "folder":
-                    result = self.check_folder(value, request.get("template"))
+                    # When editing, the profile's own folders don't count as "already synced".
+                    result = self.check_folder(value, request.get("template"), request.get("template") if request.get("editing") else None)
                 elif field == "ignore":
                     patterns = ignore_lines(value)
                     result = {"status": "info", "text": f"{len(patterns)} ignore pattern{'s' if len(patterns) != 1 else ''}"} if patterns else {"status": "", "text": ""}
@@ -688,6 +842,14 @@ class Bridge:
             self.create(request)
         elif cmd == "check":
             self.check(request)
+        elif cmd == "prefs":
+            if self.prefs is None:
+                self.prefs = preference_catalog()
+            self.emit({"type": "prefs", "prefs": self.prefs})
+        elif cmd == "profile":
+            self.load_profile(request.get("name"))
+        elif cmd == "save":
+            self.save_profile(request)
         elif cmd == "start":
             self.start(request.get("profile"))
         elif cmd == "acknowledge" and phase == "warning":

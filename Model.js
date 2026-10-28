@@ -294,6 +294,46 @@ function sshRoot(user, host, path) {
   return "ssh://" + (user ? user + "@" : "") + host + "/" + where
 }
 
+function sameLine(a, b) {
+  return !!a && !!b && a.orig === b.orig && a.kind === b.kind && a.key === b.key && a.value === b.value
+}
+function sameLines(a, b) {
+  if (a.length !== b.length) return false
+  for (var i = 0; i < a.length; i++) if (!sameLine(a[i], b[i])) return false
+  return true
+}
+// Added, or different from the line it came from.
+function lineChanged(line, original) {
+  if (line.orig === null || line.orig === undefined) return true
+  var from = original.filter(function(o) { return o.orig === line.orig })[0]
+  return !from || from.key !== line.key || from.value !== line.value
+}
+
+function truthy(value) { return /^(true|yes|1)$/i.test(String(value || "").trim()) }
+
+// Is `value` acceptable for a preference of Unison's type `info.type`?
+function prefValueOk(info, value) {
+  if (!info) return false
+  value = String(value || "").trim()
+  if (info.type === "bool") return /^(true|false|yes|no)$/i.test(value)
+  if (info.type === "int") return /^-?(0o[0-7]+|0x[0-9a-fA-F]+|\d+)$/.test(value)
+  return value.indexOf("\n") < 0
+}
+
+function prefTypeLabel(info) {
+  if (!info) return "unknown"
+  if (info.type === "bool") return "boolean"
+  if (info.type === "int") return "integer"
+  return info.list ? "text list" : "text"
+}
+
+// "node_modules, *.log, Path cache" -> ["Name node_modules", "Name *.log", "Path cache"]
+function ignoreSpecs(text) {
+  return String(text || "").split(/[,\n]/).map(function(p) { return p.trim() }).filter(function(p) { return p }).map(function(p) {
+    return /^(Name|Path|BelowPath|Regex) /.test(p) ? p : "Name " + p
+  })
+}
+
 // "Music Videos" -> "music-videos": a safe, lower-case profile name part.
 function slug(text) {
   return String(text || "").toLowerCase().replace(/[^a-z0-9_.]+/g, "-").replace(/^[-.]+|-+$/g, "")

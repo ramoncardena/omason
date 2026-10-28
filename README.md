@@ -77,6 +77,28 @@ omarchy-shell shell summon io.github.ramoncardena.omason '{}'
    (`node_modules, *.log`) become `ignore = Name …` rules; `Path …` and
    `Regex …` rules can be written in full. Existing profile files are never
    modified.
+   **Edit** (`E`) opens the selected profile:
+   - **Settings**: description, folders (`path`), ignore patterns, "require
+     the folders on both sides" (`mountpoint`), "ask before emptying a
+     replica" (`confirmbigdel`), backups and how many versions to keep, and
+     FAT. The replicas are shown read-only; **Change replicas…** edits them,
+     with a warning that Unison then treats the next scan like a first sync.
+     A folder added under `mountpoint` is created on the side where it is
+     missing when you save.
+   - **All preferences**: every preference line, like Unison's own editor,
+     with its type, value, and Unison's short and long documentation (read
+     from the installed Unison). Filter, `↑`/`↓` to choose, `Enter` to edit,
+     `Delete` to remove; **Add preference** lists all of Unison's
+     preferences.
+
+   Saving (`Ctrl+S`) rewrites only the lines you changed; comments, blank
+   lines, `include` lines and the order are kept exactly. Values are checked
+   against Unison's types, unknown preference names are refused, the
+   previous version is kept under `$XDG_STATE_HOME/omason/profile-backups/`
+   (the last 10 per profile), and the file is replaced in one step. A profile
+   that changed on disk since it was opened, or that is being reviewed or
+   synced, is not saved. `Esc` closes the editor; with unsaved changes it
+   asks for a second `Esc`.
 2. Scanning launches Unison's text interface. Its first-run and whole-replica
    deletion warnings appear as a card that needs a separate confirmation.
 3. The review screen shows the two replicas facing each other, with counts of
@@ -138,7 +160,7 @@ preference editor.
 | D / F | Show or hide the diff preview / open the full diff (N / P jump between changes) |
 | G | Sync the shown directions |
 | C / V | Cancel the review or stop the sync / show Unison's output |
-| N / R | New profile / scan (again) |
+| N / R / E | New profile / scan (again) / edit the selected profile |
 | Backspace | Leave a finished session, record, or form |
 | Escape / Tab | Close popup / switch Omarchy panel |
 

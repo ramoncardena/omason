@@ -16,6 +16,9 @@ BarWidget {
     property string stateDirectory: ""
     property string errorMessage: ""
     property var checks: ({})
+    property var profileDoc: null
+    property var prefs: []
+    property var prefsByName: ({})
     property string notice: ""
     property string pickField: ""
     property var session: ({ phase: "idle", items: [], current: "", profile: "", message: "Choose a profile to review changes.", details: "", detailsPath: "", tail: "", run: "", totals: {}, progress: null, pending: 0, syncRequested: false })
@@ -54,6 +57,16 @@ BarWidget {
                 const before = session.phase
                 session = data
                 if (["scanning", "syncing", "cancelling", "review", "ready", "warning"].indexOf(before) >= 0) notifyIfClosed(data)
+            } else if (data.type === "profile") {
+                profileDoc = data
+            } else if (data.type === "prefs") {
+                const byName = {}
+                for (const p of data.prefs) byName[p.name] = p
+                prefsByName = byName
+                prefs = data.prefs
+            } else if (data.type === "saved") {
+                notice = "Saved " + data.profile + "." + (data.note ? " " + data.note : "") + " The previous version was kept in omaSon's state folder."
+                if (panelLoader.item) panelLoader.item.closeEdit()
             } else if (data.type === "check") {
                 checks = data.results
             } else if (data.type === "created") {

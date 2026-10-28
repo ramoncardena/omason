@@ -27,6 +27,40 @@ Panel {
     // Which screen is showing is derived from session state, so closing and
     // reopening the popup always lands on the live session.
     property bool creating: false
+    // Profile editor: an in-memory copy of the profile's lines, saved as a whole.
+    property bool editing: false
+    property string editName: ""
+    property var editDoc: null
+    property var editLines: []
+    property string editTab: "settings"
+    property int editSelected: -1
+    property string editSearch: ""
+    property bool editRoots: false
+    readonly property var loadedDoc: host.profileDoc || null
+    readonly property var prefInfo: host.prefsByName || ({})
+    // Compared field by field: objects passed through QML models don't keep their key order.
+    readonly property bool editDirty: !!editDoc && !Model.sameLines(editLines, editDoc.lines)
+    readonly property var editProblems: editLines.filter(function(l) { return l.kind === "pref" && !Model.prefValueOk(root.prefInfo[l.key], l.value) })
+    onLoadedDocChanged: if (editing && loadedDoc && loadedDoc.name === editName && !editDoc) {
+        editDoc = loadedDoc
+        editLines = JSON.parse(JSON.stringify(loadedDoc.lines))
+        editDescription.text = editValue("label", "")
+        editMaxBackups.text = editValue("maxbackups", "")
+        Qt.callLater(function() { editDescription.forceActiveFocus() })
+    }
+    // Lines shown in the All preferences tab, as indices into editLines.
+    readonly property var editVisible: editLines.map(function(l, i) { return i }).filter(function(i) {
+        const l = root.editLines[i]
+        return l.kind === "pref" && (!root.editSearch || l.key.toLowerCase().indexOf(root.editSearch) >= 0 || l.value.toLowerCase().indexOf(root.editSearch) >= 0)
+    })
+    property bool discardArmed: false
+    Timer { id: discardTimer; interval: 3000; onTriggered: root.discardArmed = false }
+    // Esc closes the editor; with unsaved changes it asks for a second Esc.
+    function escapeEdit() {
+        if (editDirty && !discardArmed) { discardArmed = true; discardTimer.restart(); return }
+        discardArmed = false
+        closeEdit()
+    }
     property string createMode: "folder"
     property string formTemplate: ""
     property bool nameEdited: false
@@ -83,7 +117,7 @@ Panel {
         else if (phase === "cancelled" && !committing) dismissedRun = sessionState.run
     }
     readonly property bool sessionVisible: host.busy || (finished && !!sessionState.run && sessionState.run !== dismissedRun)
-    readonly property string view: sessionVisible ? "session" : (creating ? "create" : (record ? "record" : "home"))
+    readonly property string view: sessionVisible ? "session" : (creating ? "create" : (editing ? "edit" : (record ? "record" : "home")))
     readonly property var shownItems: view === "record" ? (record.items || []) : (view === "session" ? sessionState.items : [])
     readonly property var shownProfile: profileNamed(view === "record" ? record.profile : sessionState.profile)
     readonly property var leftReplica: Model.replicaOf(shownProfile, 0)
@@ -99,7 +133,7 @@ Panel {
     readonly property var profileOptions: homeList.rows.map(function(p) { return { value: p.name, label: p.label, description: Model.profileDescription(p, root.now) } })
     readonly property var recent: Model.recentRuns(host.history.filter(function(r) { return r.profile === root.host.selectedProfile }), 3)
     readonly property bool canScan: !host.busy && host.available && !!selected && !Model.offlineReplica(selected)
-    readonly property int targetCount: view === "home" ? (host.profiles.length ? 2 + recent.length : 1)
+    readonly property int targetCount: view === "home" ? (host.profiles.length ? 3 + recent.length : 1)
         : (view === "session" ? plan.rows.length + (syncRowVisible ? 1 : 0) : (view === "record" ? plan.rows.length : 0))
 
     readonly property var scanPhrases: ["Comparing replicas", "Reading archives", "Walking both trees", "Spotting differences", "Checking fingerprints"]
@@ -228,6 +262,102 @@ Panel {
         focusDelay.restart()
     }
     function cancelForm() { creating = false; keyCatcher.forceActiveFocus() }
+    // ---- profile editor ---------------------------------------------------
+    function openEdit() {
+        if (host.busy || !selected) return
+        record = null
+        editName = selected.name
+        editDoc = null
+        editLines = []
+        editTab = "settings"
+        editSelected = -1
+        editSearch = ""
+        editRoots = false
+        for (const field of [editDescription, editFolderAdd, editIgnoreAdd, editSearchField, editMaxBackups]) field.text = ""
+        if (root.hostWidget) { root.hostWidget.profileDoc = null; root.hostWidget.notice = ""; root.hostWidget.checks = ({}) }
+        editing = true
+        send("profile", { name: editName })
+        if (!host.prefs || !host.prefs.length) send("prefs")
+    }
+    function closeEdit() { editing = false; editDoc = null; keyCatcher.forceActiveFocus() }
+    function saveEdit() {
+        if (!editDirty || editProblems.length) return
+        send("save", { name: editName, hash: editDoc.hash, lines: editLines })
+    }
+    function editValues(key) {
+        return editLines.filter(function(l) { return l.kind === "pref" && l.key === key }).map(function(l) { return l.value })
+    }
+    // Unison uses the last setting of a single-valued preference.
+    function editValue(key, fallback) { const v = editValues(key); return v.length ? v[v.length - 1] : fallback }
+    function editFlag(key, fallback) { return Model.truthy(editValue(key, fallback ? "true" : "false")) }
+    function originallyHas(key) { return !!editDoc && editDoc.lines.some(function(l) { return l.kind === "pref" && l.key === key }) }
+    // Replace every line of `key` with `list`, in place of the first one (or at the end).
+    function setEditValues(key, list) {
+        const lines = editLines.slice()
+        const at = []
+        lines.forEach(function(l, i) { if (l.kind === "pref" && l.key === key) at.push(i) })
+        const fresh = list.map(function(v, n) {
+            return n < at.length ? Object.assign({}, lines[at[n]], { value: v }) : { orig: null, kind: "pref", key: key, value: v, raw: "" }
+        })
+        const kept = lines.filter(function(l, i) { return at.indexOf(i) < 0 })
+        kept.splice(at.length ? at[0] : kept.length, 0, ...fresh)
+        editLines = kept
+    }
+    // A switch: remove the line again when it goes back to Unison's default and wasn't written before.
+    function setEditFlag(key, on, unisonDefault) {
+        setEditValues(key, on === unisonDefault && !originallyHas(key) ? [] : [on ? "true" : "false"])
+    }
+    function addEditFolder() {
+        const folder = editFolderAdd.text.trim().replace(/^\/+|\/+$/g, "")
+        if (!folder || editValues("path").indexOf(folder) >= 0) return
+        const guarded = editValues("mountpoint").length > 0
+        setEditValues("path", editValues("path").concat([folder]))
+        if (guarded) setEditValues("mountpoint", editValues("mountpoint").concat([folder]))
+        editFolderAdd.text = ""
+    }
+    function removeEditFolder(folder) {
+        setEditValues("path", editValues("path").filter(function(p) { return p !== folder }))
+        setEditValues("mountpoint", editValues("mountpoint").filter(function(p) { return p !== folder }))
+    }
+    function addEditIgnores() {
+        const added = Model.ignoreSpecs(editIgnoreAdd.text).filter(function(p) { return editValues("ignore").indexOf(p) < 0 })
+        if (added.length) setEditValues("ignore", editValues("ignore").concat(added))
+        editIgnoreAdd.text = ""
+    }
+    function setEditRoots() {
+        if (editLeft.unisonRoot && editRight.unisonRoot) setEditValues("root", [editLeft.unisonRoot, editRight.unisonRoot])
+    }
+    // All preferences tab: change, add or remove one line.
+    function setEditLine(index, value) {
+        const lines = editLines.slice()
+        lines[index] = Object.assign({}, lines[index], { value: value })
+        editLines = lines
+    }
+    function removeEditLine(index) {
+        const lines = editLines.slice()
+        lines.splice(index, 1)
+        editLines = lines
+        editSelected = -1
+    }
+    function addEditPref(name) {
+        const info = prefInfo[name]
+        if (!info) return
+        const lines = editLines.slice()
+        let at = lines.length
+        lines.forEach(function(l, i) { if (l.kind === "pref" && l.key === name) at = i + 1 })
+        lines.splice(at, 0, { orig: null, kind: "pref", key: name, value: info.type === "bool" ? "true" : (info.type === "int" ? "0" : ""), raw: "" })
+        editLines = lines
+        editSearch = ""
+        editSearchField.text = ""
+        selectEditLine(at)
+    }
+    function selectEditLine(index) {
+        editSelected = index
+        const line = editLines[index]
+        if (line) editValueField.text = line.value
+        Qt.callLater(function() { if (editValueField.visible) editValueField.forceActiveFocus() })
+    }
+
     function pairName(pair) { return pair.left.name + " " + Model.glyph.swap + " " + pair.right.name }
     function setCreateMode(mode) {
         createMode = mode
@@ -242,7 +372,7 @@ Panel {
         else { fields.left = leftInput.unisonRoot; fields.right = rightInput.unisonRoot }
         return fields
     }
-    function scheduleCheck() { if (creating) checkTimer.restart() }
+    function scheduleCheck() { if (creating || editing) checkTimer.restart() }
     // "gator-" + "music" in a pair of gator-* profiles; the folder name otherwise.
     function suggestName() {
         if (nameEdited || !creating) return
@@ -259,12 +389,22 @@ Panel {
     // full-screen panel: the widget closes the panel, runs it, and reopens.
     function browse(field) {
         if (!root.hostWidget) return
-        const start = field === "folder" ? (formPair ? formPair.left.root : "")
-            : (field === "left" ? leftInput.unisonRoot : rightInput.unisonRoot) || ""
-        const titles = { folder: "Choose a folder inside " + (formPair ? formPair.left.name : "the pair"), left: "Choose the left replica", right: "Choose the right replica" }
+        const starts = { folder: formPair ? formPair.left.root : "", left: leftInput.unisonRoot, right: rightInput.unisonRoot,
+                         editLeft: editLeft.unisonRoot, editRight: editRight.unisonRoot, editFolder: editValues("root")[0] || "" }
+        const start = starts[field] || ""
+        const titles = { folder: "Choose a folder inside " + (formPair ? formPair.left.name : "the pair"), left: "Choose the left replica", right: "Choose the right replica",
+                         editLeft: "Choose the left replica", editRight: "Choose the right replica", editFolder: "Choose a folder inside a replica" }
         root.hostWidget.browse(field, start, titles[field])
     }
     function applyPick(field, path) {
+        if (field === "editLeft" || field === "editRight") { (field === "editLeft" ? editLeft : editRight).setFolder(path); return }
+        if (field === "editFolder") {
+            const roots = editValues("root").map(function(r) { return r.replace(/\/+$/, "") })
+            const inside = roots.find(function(r) { return path === r || path.indexOf(r + "/") === 0 })
+            if (inside !== undefined) editFolderAdd.text = path.slice(inside.length + 1)
+            else if (root.hostWidget) root.hostWidget.errorMessage = "Choose a folder inside one of the replicas."
+            return
+        }
         if (field === "folder") {
             const roots = formPair ? [formPair.left.root, formPair.right.root] : []
             const inside = roots.find(function(r) { return path === r || path.indexOf(r.replace(/\/+$/, "") + "/") === 0 })
@@ -286,6 +426,7 @@ Panel {
         if (view === "session") done()
         else if (view === "record") record = null
         else if (view === "create") cancelForm()
+        else if (view === "edit") closeEdit()
     }
 
     // ---- cursor --------------------------------------------------------
@@ -308,7 +449,8 @@ Panel {
             if (!host.profiles.length) openCreate()
             else if (cursor === 0) profilePicker.open()
             else if (cursor === 1) startScan(host.selectedProfile)
-            else record = recent[cursor - 2]
+            else if (cursor === 2) openEdit()
+            else record = recent[cursor - 3]
         } else if (cursorRow()) {
             toggleExpand(cursorRow())
         } else if (view === "session") {
@@ -322,6 +464,7 @@ Panel {
         else if (view === "home" && text === "n") openCreate()
         else if (view === "home" && text === "r") startScan(host.selectedProfile)
         else if (view === "home" && text === "p" && host.profiles.length) profilePicker.open()
+        else if (view === "home" && text === "e") openEdit()
         else if (view === "session" && text === "r" && finished) { const name = sessionState.profile; done(); startScan(name) }
         else if (view === "session" && text === "u" && row) setDirection(row, "default")
         else if (view === "session" && text === "d" && row) inspect(row)
@@ -334,7 +477,7 @@ Panel {
         Qt.callLater(function() {
             let item = null
             if (view === "home") {
-                item = cursor === 0 ? profilePicker : (cursor === 1 ? scanButton : recentRepeater.itemAt(cursor - 2))
+                item = cursor === 0 ? profilePicker : (cursor < 3 ? scanRow : recentRepeater.itemAt(cursor - 3))
             } else if (cursor < plan.rows.length) {
                 item = planRepeater.itemAt(plan.rowEntry[cursor])
             }
@@ -401,7 +544,8 @@ Panel {
         return "Sync " + count + (count === 1 ? " change" : " changes") + (tally.held ? " · hold " + tally.held : "")
     }
     function hint() {
-        if (view === "home") return "←→ profile · P search · ⏎ scan · N new profile · Esc close"
+        if (view === "home") return "←→ profile · P search · ⏎ scan · E edit · N new · Esc close"
+        if (view === "edit") return discardArmed ? "Unsaved changes · press Esc again to discard them" : (editTab === "all" ? "Type to filter · ↑↓ choose · ⏎ edit · Del remove · Ctrl+S save · Esc close" : "Tab moves · Ctrl+S save · Esc close")
         if (view === "record") return "↑↓ move · ⏎ details · ⌫ back"
         if (view === "create") return "⏎ next field · Tab moves · Esc cancel"
         if (finished) return "R scan again · ⏎ / ⌫ done · V output"
@@ -414,7 +558,9 @@ Panel {
     Timer {
         id: checkTimer
         interval: 250
-        onTriggered: root.send("check", { fields: root.formFields(), template: root.formTemplate })
+        onTriggered: root.send("check", root.view === "edit"
+            ? { fields: { left: editLeft.unisonRoot, right: editRight.unisonRoot, folder: editFolderAdd.text, ignore: editIgnoreAdd.text }, template: root.editName, editing: true }
+            : { fields: root.formFields(), template: root.formTemplate })
     }
     Timer { interval: 30000; running: root.opened; repeat: true; onTriggered: root.now = Date.now() }
     Timer {
@@ -443,7 +589,7 @@ Panel {
         PanelKeyCatcher {
             id: keyCatcher
             anchors.fill: parent
-            blocked: (root.creating && root.view === "create") || profilePicker.popupOpen || logPopup.opened || diffViewer.opened
+            blocked: (root.creating && root.view === "create") || root.view === "edit" || profilePicker.popupOpen || logPopup.opened || diffViewer.opened
             onCloseRequested: root.close()
             onTabRequested: function(direction) { root.switchPanel(direction) }
             onMoveRequested: function(dx, dy) { root.move(dx, dy) }
@@ -494,11 +640,13 @@ Panel {
                     id: hero
                     width: parent.width
                     title: root.view === "home" ? "omaSon"
+                        : (root.view === "edit" ? root.editName
                         : (root.view === "create" ? "New profile"
-                        : ((root.shownProfile ? root.shownProfile.label : (root.view === "record" ? root.record.profile : root.sessionState.profile)) || "omaSon"))
+                        : ((root.shownProfile ? root.shownProfile.label : (root.view === "record" ? root.record.profile : root.sessionState.profile)) || "omaSon")))
                     meta: root.view === "home" ? root.homeMeta()
+                        : (root.view === "edit" ? (!root.editDoc ? "Loading profile" : (root.editDirty ? "Edit profile · unsaved changes" : "Edit profile"))
                         : (root.view === "create" ? (root.createMode === "folder" ? (root.formPair ? "Add a folder to " + root.pairName(root.formPair) : "Add a folder") : "Pair two replicas")
-                        : (root.view === "record" ? Model.runSummary(root.record) + " · " + Qt.formatDateTime(new Date(root.record.started * 1000), "dd MMM HH:mm") : root.sessionMeta()))
+                        : (root.view === "record" ? Model.runSummary(root.record) + " · " + Qt.formatDateTime(new Date(root.record.started * 1000), "dd MMM HH:mm") : root.sessionMeta())))
                     foreground: root.foreground
                     fontFamily: root.family
                     iconComponent: Component {
@@ -641,10 +789,14 @@ Panel {
                             color: root.accent
                         }
 
-                        Button {
-                            id: scanButton
+                        Row {
+                            id: scanRow
                             visible: root.host.profiles.length > 0
                             width: parent.width
+                            spacing: Style.space(8)
+                        Button {
+                            id: scanButton
+                            width: parent.width - editButton.width - parent.spacing
                             text: root.scanLabel()
                             bordered: true
                             selected: root.canScan
@@ -654,6 +806,19 @@ Panel {
                             fontFamily: root.family
                             onHovered: function(isHovered) { if (isHovered) root.setCursor(1) }
                             onClicked: root.startScan(root.host.selectedProfile)
+                        }
+                        Button {
+                            id: editButton
+                            text: "Edit"
+                            iconText: Model.glyph.changed
+                            bordered: true
+                            hasCursor: root.cursorActive && root.cursor === 2
+                            enabled: !root.host.busy && !!root.selected
+                            opacity: enabled ? 1 : 0.55
+                            fontFamily: root.family
+                            onHovered: function(isHovered) { if (isHovered) root.setCursor(2) }
+                            onClicked: root.openEdit()
+                        }
                         }
 
                         // No profiles yet.
@@ -687,7 +852,7 @@ Panel {
                                     required property var modelData
                                     required property int index
                                     width: parent.width
-                                    rowIndex: 2 + index
+                                    rowIndex: 3 + index
                                     glyphText: Model.statusGlyph(modelData.phase, modelData.result)
                                     glyphColor: Model.runProblem(modelData) ? root.urgent : root.foreground
                                     title: Model.runSummary(modelData)
@@ -862,6 +1027,378 @@ Panel {
                         }
                     }
 
+                    // ---- edit profile --------------------------------------
+                    Column {
+                        visible: root.view === "edit"
+                        width: parent.width
+                        spacing: Style.space(10)
+                        Keys.onEscapePressed: root.escapeEdit()
+                        Keys.onPressed: function(event) {
+                            if (event.key === Qt.Key_S && (event.modifiers & Qt.ControlModifier)) { root.saveEdit(); event.accepted = true }
+                        }
+
+                        PanelSeparator { foreground: root.foreground }
+                        ButtonGroup {
+                            options: [{ value: "settings", label: "Settings" }, { value: "all", label: "All preferences · " + root.editLines.filter(function(l) { return l.kind === "pref" }).length }]
+                            value: root.editTab
+                            foreground: root.foreground
+                            fontFamily: root.family
+                            focusable: true
+                            onChanged: function(value) {
+                                root.editTab = value
+                                Qt.callLater(function() { (value === "all" ? editSearchField : editDescription).forceActiveFocus() })
+                            }
+                        }
+                        Caption { visible: !root.editDoc; text: "Loading " + root.editName + "…" }
+
+                        // ---- Settings tab: the usual things, as controls.
+                        Column {
+                            visible: !!root.editDoc && root.editTab === "settings"
+                            width: parent.width
+                            spacing: Style.space(8)
+
+                            FieldLabel { text: "DESCRIPTION" }
+                            TextField {
+                                id: editDescription
+                                width: parent.width
+                                placeholderText: "What this profile keeps in sync"
+                                maximumLength: 200
+                                onTextEdited: root.setEditValues("label", text.trim() ? [text.trim()] : [])
+                            }
+
+                            FieldLabel { text: "REPLICAS"; topPadding: Style.space(6) }
+                            BridgeCard {
+                                width: parent.width
+                                readonly property var roots: root.editValues("root")
+                                leftSide: roots.length ? Model.classify(roots[0]) : null
+                                rightSide: roots.length > 1 ? Model.classify(roots[1]) : null
+                                preview: true
+                            }
+                            Button {
+                                visible: !root.editRoots && root.editValues("root").length === 2
+                                text: "Change replicas…"
+                                bordered: true
+                                fontFamily: root.family
+                                fontSize: Style.font.bodySmall
+                                onClicked: {
+                                    const roots = root.editValues("root")
+                                    editLeft.setRoot(roots[0])
+                                    editRight.setRoot(roots[1])
+                                    root.editRoots = true
+                                    root.scheduleCheck()
+                                }
+                            }
+                            Caption {
+                                visible: root.editRoots
+                                text: "Unison keys its sync history to the two roots. After changing them, the next scan treats every file as new, like a first sync."
+                                color: root.urgent
+                            }
+                            ReplicaInput {
+                                id: editLeft
+                                visible: root.editRoots
+                                width: parent.width
+                                title: "LEFT"
+                                field: "left"
+                                folderHint: "/home/you/Documents"
+                                onEdited: { root.setEditRoots(); root.scheduleCheck() }
+                                onBrowse: root.browse("editLeft")
+                            }
+                            ReplicaInput {
+                                id: editRight
+                                visible: root.editRoots
+                                width: parent.width
+                                title: "RIGHT"
+                                field: "right"
+                                folderHint: "/run/media/you/Drive/Documents"
+                                onEdited: { root.setEditRoots(); root.scheduleCheck() }
+                                onBrowse: root.browse("editRight")
+                            }
+
+                            FieldLabel { text: "FOLDERS"; topPadding: Style.space(6) }
+                            Caption {
+                                visible: root.editValues("path").length === 0
+                                text: "No folders listed, so the whole replica is synced."
+                            }
+                            Repeater {
+                                model: root.editValues("path")
+                                ListEntry {
+                                    required property string modelData
+                                    width: parent.width
+                                    glyph: Model.glyph.folder
+                                    text: modelData
+                                    onRemove: root.removeEditFolder(modelData)
+                                }
+                            }
+                            PathRow {
+                                field: editFolderAdd
+                                onBrowse: root.browse("editFolder")
+                                TextField {
+                                    id: editFolderAdd
+                                    width: parent.width
+                                    placeholderText: "Add a folder · synced on both sides"
+                                    onTextChanged: root.scheduleCheck()
+                                    onAccepted: root.addEditFolder()
+                                }
+                            }
+                            CheckLine { field: "folder"; value: editFolderAdd.text }
+
+                            FieldLabel { text: "IGNORE"; topPadding: Style.space(6) }
+                            Caption { visible: root.editValues("ignore").length === 0; text: "Nothing is ignored." }
+                            Repeater {
+                                model: root.editValues("ignore")
+                                ListEntry {
+                                    required property string modelData
+                                    width: parent.width
+                                    glyph: Model.glyph.held
+                                    text: modelData
+                                    onRemove: root.setEditValues("ignore", root.editValues("ignore").filter(function(p) { return p !== modelData }))
+                                }
+                            }
+                            TextField {
+                                id: editIgnoreAdd
+                                width: parent.width
+                                placeholderText: "Add patterns · node_modules, *.log, Path cache"
+                                onTextChanged: root.scheduleCheck()
+                                onAccepted: root.addEditIgnores()
+                            }
+                            CheckLine { field: "ignore"; value: editIgnoreAdd.text }
+
+                            FieldLabel { text: "SAFETY AND OPTIONS"; topPadding: Style.space(6) }
+                            Toggle {
+                                width: parent.width
+                                label: "Require the folders on both sides"
+                                description: root.editValues("path").length
+                                    ? "Refuses to run if a folder is missing on either side, such as on an unmounted drive (mountpoint)."
+                                    : "Needs folders to be listed above (mountpoint)."
+                                enabled: root.editValues("path").length > 0
+                                opacity: enabled ? 1 : 0.55
+                                checked: root.editValues("mountpoint").length > 0
+                                foreground: root.foreground
+                                accent: root.accent
+                                fontFamily: root.family
+                                onClicked: root.setEditValues("mountpoint", checked ? [] : root.editValues("path"))
+                            }
+                            Toggle {
+                                width: parent.width
+                                label: "Ask before emptying a replica"
+                                description: "Stops for confirmation when every file on one side would be deleted (confirmbigdel)."
+                                checked: root.editFlag("confirmbigdel", true)
+                                foreground: root.foreground
+                                accent: root.accent
+                                fontFamily: root.family
+                                onClicked: root.setEditFlag("confirmbigdel", !checked, true)
+                            }
+                            Toggle {
+                                width: parent.width
+                                label: "Keep backups of replaced and deleted files"
+                                description: "Unison stores the previous version before overwriting or deleting (backup = Name *)."
+                                checked: root.editValues("backup").length > 0
+                                foreground: root.foreground
+                                accent: root.accent
+                                fontFamily: root.family
+                                onClicked: root.setEditValues("backup", checked ? [] : ["Name *"])
+                            }
+                            Row {
+                                visible: root.editValues("backup").length > 0
+                                width: parent.width
+                                spacing: Style.space(10)
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    textFormat: Text.PlainText
+                                    text: "Versions to keep"
+                                    color: root.foreground
+                                    font.family: root.family
+                                    font.pixelSize: Style.font.bodySmall
+                                }
+                                TextField {
+                                    id: editMaxBackups
+                                    width: Style.space(90)
+                                    placeholderText: "2"
+                                    validator: IntValidator { bottom: 1; top: 1000 }
+                                    onTextEdited: root.setEditValues("maxbackups", text.trim() ? [text.trim()] : [])
+                                }
+                                Caption { anchors.verticalCenter: parent.verticalCenter; width: implicitWidth; text: editMaxBackups.text ? "" : "Unison's default is 2" }
+                            }
+                            Toggle {
+                                width: parent.width
+                                label: "FAT or exFAT drive"
+                                description: "Skips permissions, symlinks and letter-case differences, which these drives can't store (fat)."
+                                checked: root.editFlag("fat", false)
+                                foreground: root.foreground
+                                accent: root.accent
+                                fontFamily: root.family
+                                onClicked: root.setEditFlag("fat", !checked, false)
+                            }
+                        }
+
+                        // ---- All preferences tab: every line, like Unison's own editor.
+                        Column {
+                            visible: !!root.editDoc && root.editTab === "all"
+                            width: parent.width
+                            spacing: Style.space(8)
+
+                            Row {
+                                width: parent.width
+                                spacing: Style.space(8)
+                                TextField {
+                                    id: editSearchField
+                                    width: parent.width - editAddPref.width - parent.spacing
+                                    placeholderText: "Filter preferences"
+                                    onTextChanged: root.editSearch = text.trim().toLowerCase()
+                                    Keys.onPressed: function(event) {
+                                        const rows = root.editVisible
+                                        const at = rows.indexOf(root.editSelected)
+                                        if ((event.key === Qt.Key_Down || event.key === Qt.Key_Up) && rows.length) {
+                                            const next = event.key === Qt.Key_Down ? Math.min(rows.length - 1, at + 1) : Math.max(0, at < 0 ? 0 : at - 1)
+                                            root.editSelected = rows[next]
+                                            const line = root.editLines[rows[next]]
+                                            if (line) editValueField.text = line.value
+                                            event.accepted = true
+                                        } else if (event.key === Qt.Key_Delete && root.editSelected >= 0) {
+                                            const gone = at
+                                            root.removeEditLine(root.editSelected)
+                                            const left = root.editVisible
+                                            if (left.length) { root.editSelected = left[Math.min(gone, left.length - 1)]; editValueField.text = root.editLines[root.editSelected].value }
+                                            event.accepted = true
+                                        } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && root.editSelected >= 0) {
+                                            const info = root.prefInfo[root.editLines[root.editSelected].key]
+                                            if (info && info.type === "bool") root.setEditLine(root.editSelected, Model.truthy(root.editLines[root.editSelected].value) ? "false" : "true")
+                                            else editValueField.forceActiveFocus()
+                                            event.accepted = true
+                                        }
+                                    }
+                                }
+                                SearchableDropdown {
+                                    id: editAddPref
+                                    width: Style.space(190)
+                                    showLabel: false
+                                    triggerLabel: "Add preference"
+                                    placeholderText: "Search Unison's preferences…"
+                                    // Names only: matching descriptions would put "retry" ("…N times") ahead of "times".
+                                    options: (root.host.prefs || []).map(function(p) { return { value: p.name, label: p.name } })
+                                    value: ""
+                                    fontFamily: root.family
+                                    onChanged: function(value) { root.addEditPref(value) }
+                                }
+                            }
+                            Column {
+                                width: parent.width
+                                spacing: Style.space(2)
+                                Repeater {
+                                    model: root.editVisible.map(function(i) { return { line: root.editLines[i], index: i } })
+                                    PrefRow {
+                                        required property var modelData
+                                        width: parent.width
+                                        line: modelData.line
+                                        lineIndex: modelData.index
+                                    }
+                                }
+                            }
+                            Caption {
+                                readonly property int other: root.editLines.filter(function(l) { return l.kind === "comment" || l.kind === "other" }).length
+                                visible: other > 0
+                                text: other + (other === 1 ? " comment or include line is" : " comment and include lines are") + " kept exactly as written."
+                            }
+
+                            // The selected preference: its value and Unison's documentation.
+                            CursorSurface {
+                                id: prefDetail
+                                readonly property var line: root.editSelected >= 0 ? root.editLines[root.editSelected] || null : null
+                                readonly property var info: line ? root.prefInfo[line.key] || null : null
+                                visible: line !== null
+                                width: parent.width
+                                bordered: true
+                                foreground: root.foreground
+                                implicitHeight: detailColumn.implicitHeight + Style.space(20)
+                                Column {
+                                    id: detailColumn
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.margins: Style.space(10)
+                                    spacing: Style.space(8)
+                                    Item {
+                                        width: parent.width
+                                        implicitHeight: detailName.implicitHeight
+                                        Text {
+                                            id: detailName
+                                            textFormat: Text.PlainText
+                                            text: prefDetail.line ? prefDetail.line.key : ""
+                                            color: root.foreground
+                                            font.family: root.family
+                                            font.pixelSize: Style.font.body
+                                            font.bold: true
+                                        }
+                                        Text {
+                                            anchors.right: parent.right
+                                            anchors.verticalCenter: detailName.verticalCenter
+                                            textFormat: Text.PlainText
+                                            text: Model.prefTypeLabel(prefDetail.info).toUpperCase()
+                                            color: root.dim
+                                            font.family: root.family
+                                            font.pixelSize: Style.font.caption
+                                            font.bold: true
+                                        }
+                                    }
+                                    Toggle {
+                                        visible: !!prefDetail.info && prefDetail.info.type === "bool"
+                                        width: parent.width
+                                        label: checked ? "On" : "Off"
+                                        checked: !!prefDetail.line && Model.truthy(prefDetail.line.value)
+                                        foreground: root.foreground
+                                        accent: root.accent
+                                        fontFamily: root.family
+                                        onClicked: root.setEditLine(root.editSelected, checked ? "false" : "true")
+                                    }
+                                    TextField {
+                                        id: editValueField
+                                        visible: !prefDetail.info || prefDetail.info.type !== "bool"
+                                        width: parent.width
+                                        placeholderText: prefDetail.info && prefDetail.info.type === "int" ? "A number" : "Value"
+                                        onTextEdited: root.setEditLine(root.editSelected, text)
+                                        // Enter returns to the list.
+                                        onAccepted: editSearchField.forceActiveFocus()
+                                    }
+                                    Caption {
+                                        visible: !!prefDetail.line && !Model.prefValueOk(prefDetail.info, prefDetail.line.value)
+                                        text: !prefDetail.info ? "Unison has no preference with this name; it can only be removed."
+                                            : (prefDetail.info.type === "int" ? "Needs a whole number." : "Needs true or false.")
+                                        color: root.urgent
+                                    }
+                                    Text {
+                                        visible: !!prefDetail.info
+                                        width: parent.width
+                                        textFormat: Text.PlainText
+                                        wrapMode: Text.WordWrap
+                                        text: prefDetail.info ? prefDetail.info.short.charAt(0).toUpperCase() + prefDetail.info.short.slice(1) + "." : ""
+                                        color: root.foreground
+                                        font.family: root.family
+                                        font.pixelSize: Style.font.bodySmall
+                                        font.bold: true
+                                    }
+                                    Caption { visible: !!prefDetail.info && prefDetail.info.long !== ""; text: prefDetail.info ? prefDetail.info.long : "" }
+                                    Row {
+                                        spacing: Style.space(8)
+                                        Button {
+                                            text: "Remove"
+                                            bordered: true
+                                            fontFamily: root.family
+                                            fontSize: Style.font.bodySmall
+                                            onClicked: root.removeEditLine(root.editSelected)
+                                        }
+                                        Button {
+                                            text: "Close"
+                                            bordered: true
+                                            fontFamily: root.family
+                                            fontSize: Style.font.bodySmall
+                                            onClicked: root.editSelected = -1
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // ---- session & record ----------------------------------
                     Column {
                         visible: root.view === "session" || root.view === "record"
@@ -993,6 +1530,31 @@ Panel {
                     radius: height / 2
                     color: root.accent
                     Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+                }
+            }
+
+            Row {
+                visible: root.view === "edit"
+                width: parent.width
+                spacing: Style.space(8)
+                Button {
+                    width: (parent.width - parent.spacing) / 2
+                    text: root.editProblems.length ? "Fix " + root.editProblems[0].key + " first" : (root.editDirty ? "Save changes" : "No changes")
+                    bordered: true
+                    focusable: true
+                    enabled: root.editDirty && root.editProblems.length === 0
+                    opacity: enabled ? 1 : 0.55
+                    foreground: enabled ? root.accent : root.foreground
+                    fontFamily: root.family
+                    onClicked: root.saveEdit()
+                }
+                Button {
+                    width: (parent.width - parent.spacing) / 2
+                    text: root.editDirty ? "Discard" : "Close"
+                    bordered: true
+                    focusable: true
+                    fontFamily: root.family
+                    onClicked: root.closeEdit()
                 }
             }
 
@@ -1473,6 +2035,11 @@ Panel {
         function clear() { kind = "folder"; for (const f of [localPath, hostField, userField, remotePath]) f.text = "" }
         function focusFirst() { (kind === "ssh" ? hostField : localPath).forceActiveFocus() }
         function setFolder(path) { kind = "folder"; localPath.text = path }
+        function setRoot(value) {
+            const ssh = /^ssh:\/\/(?:([^@\/]*)@)?([^\/]+)\/(.*)$/.exec(value || "")
+            if (ssh) { kind = "ssh"; userField.text = ssh[1] || ""; hostField.text = ssh[2]; remotePath.text = ssh[3] }
+            else { kind = "folder"; localPath.text = value || "" }
+        }
         onUnisonRootChanged: edited()
 
         Item {
@@ -1531,6 +2098,103 @@ Panel {
             text: "Unison root: " + replicaInput.unisonRoot
         }
         CheckLine { field: replicaInput.field; value: replicaInput.unisonRoot }
+    }
+
+    // One value in an editable list (a folder, an ignore pattern) with a remove button.
+    component ListEntry: CursorSurface {
+        id: entry
+        property string glyph: ""
+        property string text: ""
+        signal remove()
+        foreground: root.foreground
+        implicitHeight: Math.max(entryText.implicitHeight, entryRemove.implicitHeight) + Style.space(6)
+        Text {
+            id: entryGlyph
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            text: entry.glyph
+            color: root.dim
+            font.family: root.family
+            font.pixelSize: Style.font.body
+        }
+        Text {
+            id: entryText
+            anchors.left: entryGlyph.right
+            anchors.leftMargin: Style.space(10)
+            anchors.right: entryRemove.left
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: entry.text
+            color: root.foreground
+            font.family: root.family
+            font.pixelSize: Style.font.bodySmall
+            elide: Text.ElideMiddle
+        }
+        PanelActionButton {
+            id: entryRemove
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: Model.glyph.close
+            tooltipText: "Remove"
+            foreground: root.foreground
+            fontFamily: root.family
+            onClicked: entry.remove()
+        }
+    }
+
+    // One preference line in the All preferences tab: name · type · value.
+    component PrefRow: CursorSurface {
+        id: prefRow
+        property var line: null
+        property int lineIndex: -1
+        readonly property var info: line ? root.prefInfo[line.key] || null : null
+        readonly property bool changed: !!line && !!root.editDoc && Model.lineChanged(line, root.editDoc.lines)
+        current: root.editSelected === lineIndex
+        foreground: root.foreground
+        implicitHeight: prefName.implicitHeight + Style.space(10)
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.selectEditLine(prefRow.lineIndex)
+        }
+        Text {
+            id: prefName
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            width: parent.width * 0.36
+            textFormat: Text.PlainText
+            text: (prefRow.changed ? "• " : "") + (prefRow.line ? prefRow.line.key : "")
+            color: !prefRow.info ? root.urgent : (prefRow.changed ? root.accent : root.foreground)
+            font.family: root.family
+            font.pixelSize: Style.font.bodySmall
+            elide: Text.ElideRight
+        }
+        Text {
+            id: prefType
+            anchors.left: prefName.right
+            anchors.verticalCenter: parent.verticalCenter
+            width: parent.width * 0.16
+            textFormat: Text.PlainText
+            text: Model.prefTypeLabel(prefRow.info)
+            color: root.dim
+            font.family: root.family
+            font.pixelSize: Style.font.caption
+        }
+        Text {
+            anchors.left: prefType.right
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: prefRow.line ? (prefRow.line.value || "—") : ""
+            color: prefRow.line && !Model.prefValueOk(prefRow.info, prefRow.line.value) ? root.urgent : root.foreground
+            opacity: 0.85
+            font.family: root.family
+            font.pixelSize: Style.font.bodySmall
+            elide: Text.ElideMiddle
+        }
     }
 
     // A text field with a Browse… button beside it.
