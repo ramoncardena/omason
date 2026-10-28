@@ -35,42 +35,21 @@ its lock after the child exits and its output pipes drain. It sends SIGINT on
 stop or helper shutdown so Unison can finish cleanup. It never force-kills an
 active transfer or removes a lock file left by Unison.
 
-The skill's freshness check detected Quickshell 0.3.2 and changes to
-`Ui/Panel.qml` and `Ui/KeyboardPanel.qml` relative to the 2026-10-16 notes.
-The current files, shell README, and official development/publishing guides
-were read before implementation. The panel still uses the same host/owner
-injection and lifecycle contract. The external skill files were not modified;
-this workspace permits writes only to the project and temporary directories.
+## Desktop testing
 
-## Live desktop acceptance
+The panel has been exercised in the live Omarchy shell (Omarchy 4.0.0.alpha,
+Quickshell 0.3.2, Unison 2.54.0) with the demo profiles from
+`scripts/demo.sh`, driven from the keyboard: opening and closing, scanning,
+choosing directions, diffs, syncing (including a
+1 GB file), failures from a read-only folder, a missing replica, the
+notification, profile creation in both modes, editing, renaming and deleting.
+Screenshots were taken with `grim` and cropped to the panel border.
 
-On 2026-10-26, the plugin files were copied into the user plugin directory,
-validated there, and enabled by adding one entry to the watched `shell.json`
-bar layout. A timestamped backup of the original layout was retained beside
-that file. The running Quickshell instance loaded the plugin, and the helper
-created its state directory. No omaSon QML loading errors appeared in the
-shell log. The only omaSon warning was the shell's usual external plugin
-module-path warning.
+Not yet tested on a desktop:
 
-IPC calls to both Quickshell and Hyprland fail with `EPERM` inside this
-development sandbox. `omarchy-shell` hides the underlying socket failure
-behind its generic "not running" message; instance metadata confirms the
-shell is running. Consequently popup opening, synthetic input, screenshots,
-and the following interaction checks remain pending:
-
-- Open via click and `shell summon`; close via click and Escape; switch via Tab.
-- Create a profile using throwaway folders, scan, inspect diff/details, choose
-  directions, edit a choice from the summary, and sync.
-- Verify the profile picker, form field focus, keyboard shortcuts, scrolling,
-  long paths, narrow screens, and the current theme.
-- Start a session on one monitor and verify the second monitor reports the
-  busy lock rather than starting another session.
-- Close/reopen during scan/review/transfer; verify state persists. Disable the
-  plugin during a disposable session and verify Unison stops gracefully.
-- Exercise an SSH profile with an existing loaded key and known host, then
-  test an unavailable host and confirm the error is visible.
-- Check logs for QML errors. Restart the shell only after hot reload settles;
-  panel files can remain cached across hot reloads.
-- Verify actual output with a populated real profile before using it for
-  important transfers. Scheduling, watchers, interactive merges, and full
-  profile preference editing remain future work.
+- SSH replicas against a real remote host.
+- Choosing a folder in the portal folder chooser (the GTK dialog ignores
+  synthetic input; opening and cancelling it were tested).
+- Two monitors at once (the session lock is covered by the integration
+  tests).
+- Clicking the end-of-session notification to reopen the panel.

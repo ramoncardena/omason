@@ -7,12 +7,17 @@
 #   scripts/demo.sh --big     also add a 1 GB file, to watch sync progress
 #   scripts/demo.sh --remove  delete the demo folders, profile and archives
 #
-# Only touches $XDG_CACHE_HOME/omason-demo and the omason-demo profile.
+# Also creates a second demo pair, Laptop <-> Drive, with one profile per
+# folder (omason-demo-photos, omason-demo-music), like a setup that uses
+# `path =` and `mountpoint =`, for the "Add a folder" form.
+#
+# Only touches $XDG_CACHE_HOME/omason-demo and the omason-demo* profiles.
 set -euo pipefail
 
 demo=${XDG_CACHE_HOME:-$HOME/.cache}/omason-demo
 profiles=${UNISON:-$HOME/.unison}
 profile=$profiles/omason-demo.prf
+pair_profiles=("$profiles/omason-demo-photos.prf" "$profiles/omason-demo-music.prf")
 left=$demo/Documents
 right=$demo/Backup
 
@@ -31,8 +36,8 @@ if [[ ${1:-} == --remove ]]; then
   mapfile -t files < <(archives)
   [[ -d $demo ]] && chmod -R u+rwX -- "$demo"
   rm -rf -- "$demo"
-  rm -f -- "$profile" "${files[@]}"
-  echo "Removed $demo, $profile and ${#files[@]} archive file(s)."
+  rm -f -- "$profile" "${pair_profiles[@]}" "${files[@]}"
+  echo "Removed $demo, the omason-demo profiles and ${#files[@]} archive file(s)."
   exit 0
 fi
 
@@ -82,4 +87,18 @@ if [[ ${1:-} == --big ]]; then
   mkdir -p -- "$left/videos"
   head -c 1G /dev/urandom > "$left/videos/trip.mp4"
 fi
-echo "Demo ready: $left <-> $right"
+# The per-folder pair: same two roots, one profile per folder, guarded by mountpoint.
+laptop=$demo/Laptop drive=$demo/Drive
+mkdir -p -- "$laptop"/{Photos/2026,Music/Albums,Videos} "$drive"
+for n in 1 2 3; do head -c 300000 /dev/urandom > "$laptop/Photos/2026/beach-$n.jpg"; done
+head -c 900000 /dev/urandom > "$laptop/Music/Albums/track-01.flac"
+cp -a -- "$laptop/Photos" "$laptop/Music" "$drive/"
+for folder in Photos Music; do
+  name=omason-demo-$(echo "$folder" | tr 'A-Z' 'a-z')
+  printf '# omaSon demo profile (safe to delete: scripts/demo.sh --remove)\nroot = %s\nroot = %s\npath = %s\nmountpoint = %s\ntimes = true\nperms = 0\nlabel = %s from the laptop to the backup drive\n' \
+    "$laptop" "$drive" "$folder" "$folder" "$folder" > "$profiles/$name.prf"
+  unison "$name" -batch -ui text -terse >/dev/null 2>&1 || { echo "baseline sync of $name failed" >&2; exit 1; }
+done
+head -c 280000 /dev/urandom > "$laptop/Photos/2026/sunset.jpg"
+
+echo "Demo ready: $left <-> $right, and $laptop <-> $drive"
