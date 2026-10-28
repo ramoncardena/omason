@@ -47,9 +47,12 @@ omarchy-shell shell summon io.github.ramoncardena.omason '{}'
    drive is flagged and scanning waits until it is connected.
 
    **New profile** (`N` or **+**) has two modes:
-   - **Add a folder to a pair**, for profiles that share two roots and each
-     sync one folder (`path = …`), like `gator-desktop` and `gator-music`.
-     Choose the pair and the folder (typed, or with **Browse…**). The new
+   - **Add a folder to existing replicas** (shown as e.g. "Add a folder to
+     Home ⇄ PERSONAL_SSD"), for profiles that share two roots and each sync
+     one folder (`path = …`), like `gator-desktop` and `gator-music`. The
+     folder is a path inside both roots, so `Music` syncs
+     `~/Music ⇄ /Gator/Music`. Type it or use **Browse…** on either side;
+     with several such pairs, choose one first. The new
      profile copies the roots and options of a profile in that pair, leaving
      out its folder, ignore rules and comments, and suggests a name with the
      same prefix. If that profile uses `mountpoint` (Unison's guard against an

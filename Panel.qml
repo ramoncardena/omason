@@ -30,6 +30,7 @@ Panel {
     property string createMode: "folder"
     property string formTemplate: ""
     property bool nameEdited: false
+    property string pickError: ""
     // Pairs a folder can be added to: shared roots, one folder per profile.
     readonly property var pairs: Model.profilePairs(host.profiles)
     readonly property var formPair: pairs.find(function(p) { return p.template === root.formTemplate }) || null
@@ -103,6 +104,7 @@ Panel {
         viewerPath = ""
         showLog = false
         if (panelFlick) panelFlick.contentY = 0
+        if (root.hostWidget) root.hostWidget.errorMessage = ""
     }
     onTargetCountChanged: if (cursor >= targetCount) cursor = Math.max(0, targetCount - 1)
     onOpenedChanged: if (opened) {
@@ -128,7 +130,11 @@ Panel {
         if (root.hostWidget) root.hostWidget.selectedProfile = name
         send("start", { profile: name })
     }
-    function selectProfile(name) { if (root.hostWidget && name) root.hostWidget.selectedProfile = name }
+    function selectProfile(name) {
+        if (!root.hostWidget || !name) return
+        root.hostWidget.selectedProfile = name
+        root.hostWidget.errorMessage = ""
+    }
     function cycleProfile(step) {
         const rows = homeList.rows
         if (!rows.length) return
@@ -202,6 +208,7 @@ Panel {
         record = null
         for (const field of [folderField, nameField, leftField, rightField, ignoreField]) field.text = ""
         nameEdited = false
+        pickError = ""
         createMode = pairs.length ? "folder" : "pair"
         const current = pairs.find(function(p) { return p.profiles.indexOf(root.host.selectedProfile) >= 0 })
         formTemplate = current ? current.template : (pairs.length ? pairs[0].template : "")
@@ -210,6 +217,7 @@ Panel {
         focusDelay.restart()
     }
     function cancelForm() { creating = false; keyCatcher.forceActiveFocus() }
+    function pairName(pair) { return pair.left.name + " " + Model.glyph.swap + " " + pair.right.name }
     function setCreateMode(mode) {
         createMode = mode
         if (!nameEdited) nameField.text = ""
@@ -249,7 +257,7 @@ Panel {
             const roots = formPair ? [formPair.left.root, formPair.right.root] : []
             const inside = roots.find(function(r) { return path === r || path.indexOf(r.replace(/\/+$/, "") + "/") === 0 })
             if (inside === undefined) {
-                if (root.hostWidget) root.hostWidget.errorMessage = "Choose a folder inside " + formPair.left.name + " or " + formPair.right.name + "."
+                pickError = "Choose a folder inside " + formPair.left.name + " or " + formPair.right.name + "."
             } else {
                 folderField.text = path.slice(inside.replace(/\/+$/, "").length + 1)
             }
@@ -477,7 +485,7 @@ Panel {
                         : (root.view === "create" ? "New profile"
                         : ((root.shownProfile ? root.shownProfile.label : (root.view === "record" ? root.record.profile : root.sessionState.profile)) || "omaSon"))
                     meta: root.view === "home" ? root.homeMeta()
-                        : (root.view === "create" ? (root.createMode === "folder" ? "Add a folder to a pair" : "Pair two replicas")
+                        : (root.view === "create" ? (root.createMode === "folder" ? (root.formPair ? "Add a folder to " + root.pairName(root.formPair) : "Add a folder") : "Pair two replicas")
                         : (root.view === "record" ? Model.runSummary(root.record) + " · " + Qt.formatDateTime(new Date(root.record.started * 1000), "dd MMM HH:mm") : root.sessionMeta()))
                     foreground: root.foreground
                     fontFamily: root.family
@@ -683,7 +691,8 @@ Panel {
 
                         ButtonGroup {
                             visible: root.pairs.length > 0
-                            options: [{ value: "folder", label: "Add a folder to a pair" }, { value: "pair", label: "New pair" }]
+                            options: [{ value: "folder", label: root.pairs.length === 1 ? "Add a folder to " + root.pairName(root.pairs[0]) : "Add a folder to existing replicas" },
+                                      { value: "pair", label: "New pair of replicas" }]
                             value: root.createMode
                             foreground: root.foreground
                             fontFamily: root.family
@@ -703,9 +712,10 @@ Panel {
                             visible: root.createMode === "folder"
                             width: parent.width
                             spacing: Style.space(8)
-                            FieldLabel { text: "PAIR" }
+                            FieldLabel { visible: root.pairs.length > 1; text: "REPLICAS" }
                             Dropdown {
                                 id: pairPicker
+                                visible: root.pairs.length > 1
                                 width: parent.width
                                 showLabel: false
                                 options: root.pairs.map(function(p) { return { value: p.template, label: p.label } })
@@ -713,7 +723,7 @@ Panel {
                                 fontFamily: root.family
                                 onChanged: function(value) { root.formTemplate = value; root.suggestName(); root.scheduleCheck() }
                             }
-                            FieldLabel { text: "FOLDER" }
+                            FieldLabel { text: "FOLDER · SYNCED ON BOTH SIDES" }
                             PathRow {
                                 field: folderField
                                 onBrowse: root.browse("folder")
@@ -721,11 +731,17 @@ Panel {
                                     id: folderField
                                     width: parent.width
                                     placeholderText: "Music"
-                                    onTextChanged: { root.suggestName(); root.scheduleCheck() }
+                                    onTextChanged: { root.pickError = ""; root.suggestName(); root.scheduleCheck() }
                                     Keys.onPressed: function(event) { root.fieldKey(event, nameField) }
                                 }
                             }
                             CheckLine { field: "folder"; value: folderField.text }
+                            // Until something is typed, say where the folder will live.
+                            Caption {
+                                visible: !folderField.text.trim() && root.pickError === "" && !!root.formPair
+                                text: !root.formPair ? "" : "A folder inside both: " + Model.withFolder(root.formPair.left, "…").path + "  " + Model.glyph.swap + "  " + Model.withFolder(root.formPair.right, "…").path
+                            }
+                            Caption { visible: root.pickError !== ""; text: root.pickError; color: root.urgent }
                         }
 
                         FieldLabel { text: "NAME" }
