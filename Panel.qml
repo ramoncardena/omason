@@ -37,8 +37,21 @@ Panel {
     property string editSearch: ""
     property bool editRoots: false
     property bool confirmDelete: false
-    // Show the whole confirmation and start on the safe choice.
-    onConfirmDeleteChanged: if (confirmDelete) Qt.callLater(function() { root.scrollIntoView(deleteCard); keepButton.forceActiveFocus() })
+    // The card is laid out only after it becomes visible; scroll once immediately
+    // and again after height settles so the confirm actions are on screen.
+    onConfirmDeleteChanged: if (confirmDelete) {
+        Qt.callLater(root.revealDeleteConfirm)
+        deleteRevealTimer.restart()
+    }
+    Timer {
+        id: deleteRevealTimer
+        interval: 50
+        onTriggered: if (root.confirmDelete) root.revealDeleteConfirm()
+    }
+    function revealDeleteConfirm() {
+        root.scrollIntoView(deleteCard)
+        keepButton.forceActiveFocus()
+    }
     readonly property bool canRename: {
         const name = editRenameField.text.trim()
         const result = host.checks ? host.checks.name : null
@@ -144,6 +157,12 @@ Panel {
     readonly property var homeList: Model.profileGroups(host.profiles)
     readonly property var selected: profileNamed(host.selectedProfile)
     readonly property var profileOptions: homeList.rows.map(function(p) { return { value: p.name, label: p.label, description: Model.profileDescription(p, root.now) } })
+    // Remount the picker when membership or selection changes — SearchableDropdown's
+    // trigger label can keep showing a deleted value after options update.
+    property int profilePickerEpoch: 0
+    readonly property string profilePickerToken: host.selectedProfile + "\0" + host.profiles.map(function(p) { return p.name }).join("\0")
+    onProfilePickerTokenChanged: profilePickerEpoch++
+    readonly property var profilePicker: profilePickerLoader.item
     readonly property var recent: Model.recentRuns(host.history.filter(function(r) { return r.profile === root.host.selectedProfile }), 3)
     readonly property bool canScan: !host.busy && host.available && !!selected && !Model.offlineReplica(selected)
     readonly property int targetCount: view === "home" ? (host.profiles.length ? 3 + recent.length : 1)
@@ -159,7 +178,10 @@ Panel {
         viewerPath = ""
         showLog = false
         if (panelFlick) panelFlick.contentY = 0
-        if (root.hostWidget) root.hostWidget.errorMessage = ""
+        if (root.hostWidget) {
+            root.hostWidget.errorMessage = ""
+            root.hostWidget.notice = ""
+        }
     }
     onTargetCountChanged: if (cursor >= targetCount) cursor = Math.max(0, targetCount - 1)
     onOpenedChanged: if (opened) {
@@ -182,13 +204,17 @@ Panel {
         record = null
         creating = false
         showLog = false
-        if (root.hostWidget) root.hostWidget.selectedProfile = name
+        if (root.hostWidget) {
+            root.hostWidget.selectedProfile = name
+            root.hostWidget.notice = ""
+        }
         send("start", { profile: name })
     }
     function selectProfile(name) {
         if (!root.hostWidget || !name) return
         root.hostWidget.selectedProfile = name
         root.hostWidget.errorMessage = ""
+        root.hostWidget.notice = ""
     }
     function cycleProfile(step) {
         const rows = homeList.rows
@@ -466,7 +492,7 @@ Panel {
         if (!cursorActive) { cursorActive = true; return }
         if (view === "home") {
             if (!host.profiles.length) openCreate()
-            else if (cursor === 0) profilePicker.open()
+            else if (cursor === 0 && profilePicker) profilePicker.open()
             else if (cursor === 1) startScan(host.selectedProfile)
             else if (cursor === 2) openEdit()
             else record = recent[cursor - 3]
@@ -482,7 +508,7 @@ Panel {
         if (text === "\b") back()
         else if (view === "home" && text === "n") openCreate()
         else if (view === "home" && text === "r") startScan(host.selectedProfile)
-        else if (view === "home" && text === "p" && host.profiles.length) profilePicker.open()
+        else if (view === "home" && text === "p" && host.profiles.length && profilePicker) profilePicker.open()
         else if (view === "home" && text === "e") openEdit()
         else if (view === "session" && phase === "warning" && text === "y") send("acknowledge")
         else if (view === "session" && text === "r" && finished) { const name = sessionState.profile; done(); startScan(name) }
@@ -505,14 +531,18 @@ Panel {
         })
     }
     function scrollIntoView(item) {
-        if (!item) return
+        if (!item || !item.visible) return
         const margin = Style.space(8)
+        const height = Math.max(item.height, item.implicitHeight)
+        if (height <= 0) return
         const top = item.mapToItem(panelFlick.contentItem, 0, 0).y
-        const bottom = top + item.height
+        const bottom = top + height
         const maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
-        if (top < panelFlick.contentY + margin) panelFlick.contentY = Math.max(0, top - margin)
+        if (top < panelFlick.contentY + margin)
+            panelFlick.contentY = Math.max(0, top - margin)
         else if (bottom > panelFlick.contentY + panelFlick.height - margin)
-            panelFlick.contentY = Math.min(maxY, Math.max(0, top - margin), bottom + margin - panelFlick.height)
+            // Prefer keeping the bottom of the item visible (confirm buttons).
+            panelFlick.contentY = Math.min(maxY, Math.max(0, bottom + margin - panelFlick.height))
     }
     // Tabbing through a form keeps the focused field on screen.
     readonly property Item focusedItem: keyCatcher.Window.activeFocusItem
@@ -619,7 +649,7 @@ Panel {
         PanelKeyCatcher {
             id: keyCatcher
             anchors.fill: parent
-            blocked: (root.creating && root.view === "create") || root.view === "edit" || profilePicker.popupOpen || logPopup.opened || diffViewer.opened
+            blocked: (root.creating && root.view === "create") || root.view === "edit" || (profilePicker && profilePicker.popupOpen) || logPopup.opened || diffViewer.opened
             onCloseRequested: root.close()
             onTabRequested: function(direction) { root.switchPanel(direction) }
             onMoveRequested: function(dx, dy) { root.move(dx, dy) }
@@ -753,22 +783,37 @@ Panel {
 
                         PanelSeparator { foreground: root.foreground }
 
-                        SearchableDropdown {
-                            id: profilePicker
+                        Loader {
+                            id: profilePickerLoader
                             visible: root.host.profiles.length > 0
                             width: parent.width
-                            label: "PROFILE"
-                            placeholderText: "Search profiles…"
-                            emptyText: "No matching profile"
-                            options: root.profileOptions
-                            value: root.host.selectedProfile
-                            fontFamily: root.family
-                            hasCursor: root.cursorActive && root.cursor === 0
-                            onHovered: function(isHovered) { if (isHovered) root.setCursor(0) }
-                            onChanged: function(value) {
-                                root.selectProfile(value)
-                                root.setCursor(1)
-                                keyCatcher.forceActiveFocus()
+                            active: visible
+                            // token/epoch changes tear the dropdown down and back up so the
+                            // trigger cannot keep a deleted profile name painted.
+                            property int epoch: root.profilePickerEpoch
+                            onEpochChanged: {
+                                if (!profilePickerLoader.visible) return
+                                profilePickerLoader.active = false
+                                Qt.callLater(function() { profilePickerLoader.active = root.host.profiles.length > 0 })
+                            }
+                            height: item ? item.implicitHeight : 0
+                            sourceComponent: Component {
+                                SearchableDropdown {
+                                    width: profilePickerLoader.width
+                                    label: "PROFILE"
+                                    placeholderText: "Search profiles…"
+                                    emptyText: "No matching profile"
+                                    options: root.profileOptions
+                                    value: root.host.selectedProfile
+                                    fontFamily: root.family
+                                    hasCursor: root.cursorActive && root.cursor === 0
+                                    onHovered: function(isHovered) { if (isHovered) root.setCursor(0) }
+                                    onChanged: function(value) {
+                                        root.selectProfile(value)
+                                        root.setCursor(1)
+                                        keyCatcher.forceActiveFocus()
+                                    }
+                                }
                             }
                         }
 
@@ -1308,6 +1353,7 @@ Panel {
                                 bordered: true
                                 foreground: root.urgent
                                 implicitHeight: deleteColumn.implicitHeight + Style.space(20)
+                                onHeightChanged: if (root.confirmDelete && height > 0) root.scrollIntoView(deleteCard)
                                 Column {
                                     id: deleteColumn
                                     anchors.left: parent.left

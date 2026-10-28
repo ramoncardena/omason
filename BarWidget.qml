@@ -50,12 +50,24 @@ BarWidget {
         if (beforeWorking && !root.working && root.needsAttention) attentionPulse.restart()
     }
 
+    // Prefer the current selection when it still exists; otherwise the most
+    // recently used living profile, else the first one.
+    function livingProfile(list, runs, current) {
+        if (list.some(function(p) { return p.name === current })) return current
+        const recent = (runs || []).find(function(r) { return list.some(function(p) { return p.name === r.profile }) })
+        return recent ? recent.profile : (list.length ? list[0].name : "")
+    }
+
     function request(command, args) {
         if (!backend.running) {
             errorMessage = "omaSon’s helper is unavailable. Reload the plugin to reconnect."
             return
         }
-        if (command !== "catalog") errorMessage = ""
+        if (command !== "catalog") {
+            errorMessage = ""
+            // Success banners (saved/deleted/…) drop on the next real action.
+            if (command !== "check") notice = ""
+        }
         var payload = args || {}
         payload.command = command
         backend.write(JSON.stringify(payload) + "\n")
@@ -70,11 +82,7 @@ BarWidget {
                 available = data.available
                 profileDirectory = data.profileDirectory
                 stateDirectory = data.stateDirectory
-                if (!profiles.some(function(p) { return p.name === root.selectedProfile })) {
-                    // Start on the most recently used profile that still exists.
-                    const recent = history.find(function(r) { return profiles.some(function(p) { return p.name === r.profile }) })
-                    selectedProfile = recent ? recent.profile : (profiles.length ? profiles[0].name : "")
-                }
+                selectedProfile = root.livingProfile(profiles, history, root.selectedProfile)
             } else if (data.type === "state") {
                 const before = root.phase
                 root.applySession(data)
@@ -94,6 +102,9 @@ BarWidget {
                 notice = "Renamed " + data.profile + " to " + data.newName + "."
                 if (panelLoader.item) panelLoader.item.closeEdit()
             } else if (data.type === "deleted") {
+                // Drop the gone name before catalog arrives; catalog then picks a
+                // living profile. The panel remounts the picker so the trigger
+                // label cannot keep showing the deleted name.
                 if (selectedProfile === data.profile) selectedProfile = ""
                 notice = "Deleted " + data.profile + ". A copy is kept in omaSon's state folder (deleted-profiles)."
                 if (panelLoader.item) panelLoader.item.closeEdit()
