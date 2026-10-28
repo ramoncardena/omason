@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.ramoncardena.omason",
   "name": "omaSon",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": "Ramon Cardena",
   "license": "MIT",
   "description": "Review Unison changes, resolve conflicts, synchronize replicas, and keep a local activity history.",

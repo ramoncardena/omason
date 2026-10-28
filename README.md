@@ -169,8 +169,10 @@ at any time; the session carries on and is there when you reopen it.
 </p>
 
 When a session ends while the panel is closed, a notification reports the
-result. Clicking it reopens the panel. The bar icon stays highlighted while a
-review is waiting, and after an error or a partial sync.
+result in generic terms (no profile name or replica paths on the command line).
+Open the panel for the detailed message. Clicking the notification reopens it.
+The bar icon stays highlighted while a review is waiting, and after an error or
+a partial sync.
 
 ### Create a profile
 

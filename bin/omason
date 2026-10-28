@@ -96,6 +96,47 @@ def fatal(text):
     return detail[:300]
 
 
+def background_notification(phase, result=None, item_count=0):
+    """Title/body safe for `omarchy-notification-send` argv: no profile or paths.
+
+    The panel and session log keep the detailed `message`; closed-panel
+    notifications must not put private roots or profile names on the command
+    line where other local users can see them.
+    """
+    if phase == "error":
+        return {
+            "title": "omaSon · sync incomplete" if result else "omaSon · Unison could not finish",
+            "body": "Unison could not finish; open omaSon for details",
+            "urgency": "critical",
+        }
+    if phase == "partial":
+        return {
+            "title": "omaSon · partly synced",
+            "body": "Finished with skipped or partially transferred items. Open omaSon for details.",
+            "urgency": "normal",
+        }
+    if phase == "complete":
+        if item_count == 0 and not result:
+            body = "Already in sync."
+        elif result:
+            body = f"Synced {result['transferred']} item{'s' if result['transferred'] != 1 else ''}"
+            body += f", {result['skipped']} held" if result["skipped"] else ""
+            body += f", {result['failed']} failed." if result["failed"] else "."
+        else:
+            body = "Synchronization complete."
+        return {"title": "omaSon", "body": body, "urgency": "normal"}
+    return None
+
+
+def notification_send_argv(notification, glyph, module_name="io.github.ramoncardena.omason"):
+    """Exact argv shape used for the closed-panel notification subprocess."""
+    return [
+        "omarchy-notification-send", "--app-name", "omaSon", "-g", glyph, "-u", notification["urgency"],
+        notification["title"], notification["body"],
+        "--exec", "omarchy-shell", "shell", "summon", module_name, "{}",
+    ]
+
+
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_. -]{0,79}")
 
 
@@ -273,7 +314,8 @@ class Bridge:
 
     def fresh(self, phase, profile, message):
         return {"phase": phase, "profile": profile, "items": [], "current": "", "message": message, "details": "",
-                "detailsPath": "", "detailsTruncated": False, "totals": {}, "progress": None, "result": None}
+                "detailsPath": "", "detailsTruncated": False, "totals": {}, "progress": None, "result": None,
+                "notification": None}
 
     def snapshot(self):
         self.last_snapshot = time.monotonic()
@@ -1047,6 +1089,7 @@ class Bridge:
             for item in self.state["items"]:
                 if "?" not in item["arrow"] and item["arrow"] != "error" and not item.get("failed"):
                     item["done"] = True
+        notice = background_notification(phase, result=result, item_count=len(self.state["items"]))
         record = {"id": self.run_id, "profile": self.state["profile"], "started": self.started,
                   "finished": time.time(), "phase": phase, "committed": self.committed, "result": result,
                   "exitCode": code, "items": self.state["items"], "logPath": str(self.state_dir / (self.run_id + ".log")), "message": message}
@@ -1057,7 +1100,7 @@ class Bridge:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as f:
             json.dump(record, f)
-        self.state.update(phase=phase, message=message, current="")
+        self.state.update(phase=phase, message=message, current="", notification=notice)
         self.child.stdin.close()
         self.child = None
         self.release()

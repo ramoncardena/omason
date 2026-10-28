@@ -215,18 +215,17 @@ BarWidget {
 
     // Only the instance that ran the session sees it finish, so this fires once
     // even with one widget per monitor. Clicking the notification opens the panel.
+    // Title/body come from the helper's `notification` field only: never put
+    // profile names or raw Unison paths into argv (local cmdline visibility).
     function notifyIfClosed(s) {
         if (opened || ["complete", "partial", "error"].indexOf(s.phase) < 0) return
-        const result = s.result
-        let title = "omaSon · " + s.profile
-        let body = s.message
-        let urgency = "normal"
+        const n = s.notification
+        if (!n || !n.title || !n.body) return
         let glyph = Model.glyph.check
-        if (s.phase === "error") { urgency = "critical"; glyph = Model.glyph.error; title += (result ? " · sync incomplete" : " · Unison could not finish") }
+        if (s.phase === "error") glyph = Model.glyph.error
         else if (s.phase === "partial") glyph = Model.glyph.conflict
-        else if (!s.items.length) body = "Already in sync."
-        Util.execArgv(["omarchy-notification-send", "--app-name", "omaSon", "-g", glyph, "-u", urgency, title, body,
-                       "--exec", "omarchy-shell", "shell", "summon", root.moduleName, "{}"])
+        Util.execArgv(["omarchy-notification-send", "--app-name", "omaSon", "-g", glyph, "-u", n.urgency || "normal",
+                       n.title, n.body, "--exec", "omarchy-shell", "shell", "summon", root.moduleName, "{}"])
     }
 
     function statusText() {

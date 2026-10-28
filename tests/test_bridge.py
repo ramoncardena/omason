@@ -655,6 +655,66 @@ class FailureTests(unittest.TestCase):
         self.assertEqual(module.fatal("all fine\n"), "")
 
 
+class NotificationPrivacyTests(unittest.TestCase):
+    """Closed-panel notifications must not put private roots or profile names in argv."""
+
+    PRIVATE_ROOT = "/private/dummy-root-xyz-omason-test"
+    SECRET_PROFILE = "secret-profile-with-private-name"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="omason-notify-")
+        self.addCleanup(self.tmp.cleanup)
+        self.state_home = Path(self.tmp.name)
+        self.env = patch.dict(os.environ, {"XDG_STATE_HOME": str(self.state_home),
+                                           "UNISON": str(self.state_home / "unison")})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        (self.state_home / "unison").mkdir()
+
+    def test_background_notification_omits_paths_and_profile(self):
+        notice = module.background_notification("error")
+        argv = module.notification_send_argv(notice, "g")
+        joined = "\0".join(argv)
+        self.assertNotIn(self.PRIVATE_ROOT, joined)
+        self.assertNotIn(self.SECRET_PROFILE, joined)
+        self.assertEqual(notice["title"], "omaSon · Unison could not finish")
+        self.assertEqual(notice["body"], "Unison could not finish; open omaSon for details")
+        self.assertEqual(notice["urgency"], "critical")
+
+    def test_missing_remote_root_with_panel_closed_keeps_path_out_of_argv(self):
+        events = []
+        bridge = module.Bridge(events.append)
+        self.addCleanup(bridge.close)
+        bridge.state = bridge.fresh("scanning", self.SECRET_PROFILE, "Looking for changes…")
+        bridge.committed = False
+        bridge.cancelled = False
+        bridge.started = time.time()
+        bridge.run_id = "notify-privacy-test"
+        bridge.tail = (
+            f"Error: Cannot find canonical name of {self.PRIVATE_ROOT}: "
+            f"unable to cd either to it ({self.PRIVATE_ROOT}: No such file or directory)\n"
+        )
+        bridge.child = type("Child", (), {"stdin": type("Stdin", (), {"close": lambda self: None})()})()
+
+        bridge.complete(3)
+
+        self.assertEqual(bridge.state["phase"], "error")
+        self.assertIn(self.PRIVATE_ROOT, bridge.state["message"])
+        notice = bridge.state["notification"]
+        self.assertIsNotNone(notice)
+        argv = module.notification_send_argv(notice, "g")
+        joined = "\0".join(argv)
+        self.assertNotIn(self.PRIVATE_ROOT, joined)
+        self.assertNotIn(self.SECRET_PROFILE, joined)
+        self.assertEqual(notice["body"], "Unison could not finish; open omaSon for details")
+        state_events = [e for e in events if e.get("type") == "state"]
+        self.assertTrue(state_events)
+        last = state_events[-1]
+        snap_argv = module.notification_send_argv(last["notification"], "g")
+        self.assertNotIn(self.PRIVATE_ROOT, "\0".join(snap_argv))
+        self.assertNotIn(self.SECRET_PROFILE, "\0".join(snap_argv))
+
+
 class ProgressTests(unittest.TestCase):
     def test_begin_end_and_progress_lines(self):
         bridge = module.Bridge(lambda _: None)
