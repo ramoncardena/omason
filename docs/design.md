@@ -1,17 +1,27 @@
 # Implementation and acceptance notes
 
-`BarWidget.qml` owns one long-running Python helper and all session state. Its
-panel can close and reopen without restarting a review. It implements the
-shell's open/close/toggle/popout coordination contract and forwards `bar`,
-`settings`, `anchorItem`, and `hostWidget` to the panel. `Panel.qml` uses the
+`BarWidget.qml` talks to a long-running Python helper and holds the panel
+injection contract (`bar`, `settings`, `anchorItem`, `hostWidget`). The panel
+can close and reopen without restarting a review. `Panel.qml` uses the
 installed `qs.Ui` components, theme typography, and keyboard panel.
+
+Omarchy instantiates one bar widget per monitor. Only one `omason serve`
+process owns Unison: it takes `serve.lock` and listens on
+`$XDG_RUNTIME_DIR/omason.sock`. Helpers on other monitors relay their
+stdin/stdout over that socket, so every panel shares the same session and
+catalog. When the server exits, clients exit with status 75 and the widget
+restarts them so another instance can become the server.
 
 `bin/omason` has no Python package dependencies. It launches Unison with an
 argument vector and uses separate nonblocking stdout/stderr pipes. Its JSON
 command protocol exposes only catalog, basic profile creation, scan, warning
 acknowledgement, item selection/direction, details/diff, summary, sync, and stop.
 There is no raw terminal-input API. A complete recognized final prompt is
-required before the sync command can send `y`.
+required before the sync command can send `y`. Preferences that run external
+programs or include other files (`diff`, `merge`, `copyprog*`, `sshcmd`,
+`servercmd`, `include`, `source`, `addprefsto`) cannot be added or changed in
+the editor; the scan command line forces safe `diff`/`sshcmd`/`servercmd` and
+disables `copyprog` via a high `copythreshold`.
 
 The panel uses three higher-level commands. `set` (path, direction) and
 `inspect` (path) are queued and applied whenever Unison is back at a prompt:
@@ -29,11 +39,13 @@ Unison. `s` opens the final summary. Purely skipped/conflicting sessions can end
 without a final transfer prompt, which is reported as a partial session. Log
 records intentionally separate planned file actions from run-level results.
 
-A nonblocking `flock` serializes sessions across monitor instances. Unison's own
-archive locks also protect against other Unison clients. The helper releases
-its lock after the child exits and its output pipes drain. It sends SIGINT on
-stop or helper shutdown so Unison can finish cleanup. It never force-kills an
-active transfer or removes a lock file left by Unison.
+A nonblocking `flock` also serializes the Unison child itself. Unison's own
+archive locks protect against other Unison clients. The helper releases its
+lock after the child exits and its output pipes drain. It sends SIGINT on stop
+or helper shutdown so Unison can finish cleanup. It never force-kills an
+active transfer or removes a lock file left by Unison. The hung-scan timeout
+does not fire while a choice queue, navigation, diff load, or initial listing
+is in progress.
 
 ## Desktop testing
 
@@ -50,6 +62,6 @@ Not yet tested on a desktop:
 - SSH replicas against a real remote host.
 - Choosing a folder in the portal folder chooser (the GTK dialog ignores
   synthetic input; opening and cancelling it were tested).
-- Two monitors at once (the session lock is covered by the integration
-  tests).
+- Two monitors at once (the shared serve socket and session lock are covered
+  by the integration tests; live dual-monitor UI is not).
 - Clicking the end-of-session notification to reopen the panel.

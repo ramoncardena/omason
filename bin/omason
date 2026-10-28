@@ -49,6 +49,29 @@ FATAL = re.compile(r"^(?:Fatal error|Error): (.+)$", re.M)
 MISSING_ROOT = re.compile(r"Cannot find canonical name of (.+?): unable to cd either to it \((?:.*: )?(.+?)\)\s*$")
 RESULT = re.compile(r"\((\d+) items? transferred, (\d+) skipped, (\d+) failed\)")
 HOST = socket.gethostname().split(".")[0]
+# Prefs that run external programs or pull in other files. omaSon overrides the
+# command ones on the Unison CLI and refuses to add or change them in the editor.
+# Existing lines may be kept verbatim or removed; include/source stay editable only
+# as preserved "other"/unchanged lines when already present.
+COMMAND_PREFS = frozenset({"diff", "merge", "copyprog", "copyprogrest", "sshcmd", "servercmd"})
+INCLUDE_PREFS = frozenset({"include", "source", "addprefsto"})
+LOCKED_PREFS = COMMAND_PREFS | INCLUDE_PREFS
+# Client helpers exit with this so the bar widget restarts and can become the server.
+RESTART_EXIT = 75
+
+
+def serve_socket_path():
+    base = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/omason-{os.getuid()}")
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return base / "omason.sock"
+
+
+def locked_pref_message(key):
+    if key in COMMAND_PREFS:
+        return (f"\"{key}\" runs an external program. omaSon sets a safe value when "
+                "scanning; remove the line or edit the profile outside omaSon.")
+    return (f"\"{key}\" pulls in other preference files. Remove the line or edit "
+            "the profile outside omaSon.")
 
 
 def reason(text):
@@ -139,7 +162,8 @@ def preference_catalog():
         name, arg, short = match.groups()
         kind = {"xxx": "string", "n": "int"}.get(arg, "bool")
         many = kind == "string" and (name in LIST_PREFS or short.startswith("add "))
-        prefs[name] = {"name": name, "type": kind, "list": many, "short": short.strip(), "long": ""}
+        prefs[name] = {"name": name, "type": kind, "list": many, "short": short.strip(), "long": "",
+                       "locked": name in LOCKED_PREFS}
     # Long descriptions: the manual's reference, "   name [xxx|n]" then indented paragraphs.
     current, body = None, []
     manual = run("-doc", "all").splitlines()
@@ -370,6 +394,8 @@ class Bridge:
                 if sep and old_key.strip() == key and old_value.strip() == value:
                     out.append(original[orig])  # unchanged: keep its exact spelling
                     continue
+            if key in LOCKED_PREFS:
+                raise ValueError(locked_pref_message(key))
             if any(c in key + value for c in "\r\n\x00"):
                 raise ValueError(f"{key}: values must be a single line.")
             if key not in known:
@@ -631,7 +657,8 @@ class Bridge:
                     note = f"Created an empty {folder} folder on {side['name']}."
             mountpoint = all(s["exists"] is not None for s in sides)
         # Keep the template's options; replace what is specific to its folder.
-        specific = {"root", "path", "mountpoint", "ignore", "ignorenot", "label"}
+        # Never copy prefs that run programs or include other files.
+        specific = {"root", "path", "mountpoint", "ignore", "ignorenot", "label"} | LOCKED_PREFS
         # Comments describe the template's folder, so only options are copied.
         kept = [line for key, _, line in rows if key not in specific and not line.lstrip().startswith("#")]
         while kept and not kept[0].strip():
@@ -672,9 +699,13 @@ class Bridge:
         os.chmod(self.log.name, 0o600)
         env = {**os.environ, "UNISON": str(self.unison_dir), "LC_ALL": "C.UTF-8", "TERM": "dumb", "PAGER": "cat"}
         # '=false' is required: '-batch false' means two extra roots in Unison!
+        # Command-line prefs override the profile, so a hostile diff/sshcmd/copyprog
+        # in ~/.unison cannot run when omaSon drives the session.
         command = ["unison", profile, "-ui", "text", "-dumbtty", "-color", "false",
                    "-silent=false", "-terse=false", "-auto=false", "-batch=false",
                    "-confirmbigdel=true", "-confirmmerge=true", "-repeat", "", "-retry", "0",
+                   "-diff", "diff -u", "-sshcmd", "ssh", "-servercmd", "unison",
+                   "-copythreshold", "2147483647",
                    "-sshargs", "-oBatchMode=yes -oStrictHostKeyChecking=yes -oConnectTimeout=15"]
         try:
             self.child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -1071,7 +1102,9 @@ class Bridge:
             self.snapshot()
         if self.child and self.child.poll() is not None and not self.selector.get_map():
             self.complete(self.child.returncode)
-        if self.child and self.state["phase"] == "scanning" and time.monotonic() - self.last_output > 120:
+        # Do not treat queue navigation, diff loads, or the initial listing as a hung scan.
+        awaiting = self.queue or self.navigation or self.awaiting_details or self.sync_requested or (self.listing and not self.listed)
+        if self.child and self.state["phase"] == "scanning" and not awaiting and time.monotonic() - self.last_output > 120:
             self.emit({"type": "error", "error": "Unison stopped responding or asked an unsupported question. Review the log, then scan again."})
             self.cancel()
 
@@ -1132,6 +1165,157 @@ def pick(title, start=""):
     return 0
 
 
+class Fanout:
+    """Broadcast JSON lines to the owning Process stdout and every peer socket."""
+
+    def __init__(self):
+        self.peers = []
+
+    def add(self, sock):
+        os.set_blocking(sock.fileno(), False)
+        self.peers.append(sock)
+
+    def remove(self, sock):
+        if sock in self.peers:
+            self.peers.remove(sock)
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def emit(self, obj):
+        line = (json.dumps(obj, ensure_ascii=True) + "\n").encode()
+        try:
+            sys.stdout.buffer.write(line)
+            sys.stdout.buffer.flush()
+        except BrokenPipeError:
+            pass
+        dead = []
+        for peer in list(self.peers):
+            try:
+                peer.sendall(line)
+            except OSError:
+                dead.append(peer)
+        for peer in dead:
+            self.remove(peer)
+
+
+def apply_line(bridge, line):
+    try:
+        bridge.handle(json.loads(line))
+    except (ValueError, OSError, StopIteration) as exc:
+        bridge.emit({"type": "error", "error": str(exc)})
+
+
+def client_serve(sock_path):
+    """Relay this bar instance's stdin/stdout to the single running helper."""
+    deadline = time.monotonic() + 2.0
+    conn = None
+    while time.monotonic() < deadline:
+        candidate = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            candidate.connect(str(sock_path))
+            conn = candidate
+            break
+        except OSError:
+            candidate.close()
+            time.sleep(0.05)
+    if conn is None:
+        return RESTART_EXIT
+    os.set_blocking(sys.stdin.fileno(), False)
+    os.set_blocking(conn.fileno(), False)
+    sel = selectors.DefaultSelector()
+    sel.register(sys.stdin, selectors.EVENT_READ)
+    sel.register(conn, selectors.EVENT_READ)
+    try:
+        while True:
+            for key, _ in sel.select(0.2):
+                if key.fileobj is sys.stdin:
+                    chunk = os.read(sys.stdin.fileno(), 65536)
+                    if not chunk:
+                        return 0
+                    conn.sendall(chunk)
+                else:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        return RESTART_EXIT
+                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.flush()
+    except (BrokenPipeError, OSError):
+        return RESTART_EXIT
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def server_serve(bridge, fanout, listen_sock):
+    """One Bridge for every monitor: stdin plus peer sockets share the same session."""
+    stop = False
+
+    def stopping(*_):
+        nonlocal stop
+        stop = True
+
+    signal.signal(signal.SIGTERM, stopping)
+    signal.signal(signal.SIGINT, stopping)
+    sel = selectors.DefaultSelector()
+    os.set_blocking(sys.stdin.fileno(), False)
+    sel.register(sys.stdin, selectors.EVENT_READ, ("stdin", None))
+    sel.register(listen_sock, selectors.EVENT_READ, ("listen", None))
+    pending = {sys.stdin.fileno(): b""}
+    bridge.catalog()
+    bridge.snapshot()
+    try:
+        while not stop:
+            for key, _ in sel.select(0):
+                tag, sock = key.data
+                if tag == "listen":
+                    conn, _ = listen_sock.accept()
+                    fanout.add(conn)
+                    sel.register(conn, selectors.EVENT_READ, ("peer", conn))
+                    pending[conn.fileno()] = b""
+                    # Catch the new bar instance up without waiting for the next poll.
+                    bridge.catalog()
+                    bridge.snapshot()
+                    continue
+                if tag == "stdin":
+                    chunk = os.read(sys.stdin.fileno(), 65536)
+                    source = sys.stdin.fileno()
+                    if not chunk:
+                        stop = True
+                        break
+                else:
+                    chunk = sock.recv(65536)
+                    source = sock.fileno()
+                    if not chunk:
+                        sel.unregister(sock)
+                        fanout.remove(sock)
+                        pending.pop(source, None)
+                        continue
+                pending[source] = pending.get(source, b"") + chunk
+                while b"\n" in pending[source]:
+                    line, pending[source] = pending[source].split(b"\n", 1)
+                    apply_line(bridge, line)
+                if len(pending[source]) > 1_000_000:
+                    stop = True
+                    break
+            bridge.pump()
+    except BrokenPipeError:
+        fanout.emit = lambda _: None
+        bridge.emit = lambda _: None
+    finally:
+        bridge.close()
+        for peer in list(fanout.peers):
+            fanout.remove(peer)
+        try:
+            sel.close()
+        except OSError:
+            pass
+    return 0
+
+
 def main():
     os.umask(0o077)
     if sys.argv[1:2] == ["pick"] and len(sys.argv) in (3, 4):
@@ -1139,40 +1323,42 @@ def main():
     if sys.argv[1:] != ["serve"]:
         print("Usage: omason serve (JSON lines on stdin/stdout) | omason pick TITLE [START]", file=sys.stderr)
         return 2
-    bridge = Bridge()
-    stop = False
-    def stopping(*_):
-        nonlocal stop
-        stop = True
-    signal.signal(signal.SIGTERM, stopping)
-    signal.signal(signal.SIGINT, stopping)
-    input_selector = selectors.DefaultSelector()
-    input_selector.register(sys.stdin, selectors.EVENT_READ)
-    os.set_blocking(sys.stdin.fileno(), False)
-    pending = b""
-    bridge.catalog()
-    bridge.snapshot()
+
+    # Omarchy runs one bar widget per monitor. Only one helper owns Unison; the
+    # others relay over a Unix socket so every panel shares the same session.
+    state_dir = Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "omason"
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    sock_path = serve_socket_path()
+    lock_file = open(state_dir / "serve.lock", "a+")
     try:
-        while not stop:
-            if input_selector.select(0):
-                chunk = os.read(sys.stdin.fileno(), 65536)
-                if not chunk:
-                    break
-                pending += chunk
-                while b"\n" in pending:
-                    line, pending = pending.split(b"\n", 1)
-                    try:
-                        bridge.handle(json.loads(line))
-                    except (ValueError, OSError, StopIteration) as exc:
-                        bridge.emit({"type": "error", "error": str(exc)})
-                if len(pending) > 1_000_000:
-                    break
-            bridge.pump()
-    except BrokenPipeError:
-        bridge.emit = lambda _: None
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        return client_serve(sock_path)
+
+    listen_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        try:
+            sock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        listen_sock.bind(str(sock_path))
+        listen_sock.listen(8)
+        os.chmod(sock_path, 0o600)
+        fanout = Fanout()
+        bridge = Bridge(emit=fanout.emit)
+        return server_serve(bridge, fanout, listen_sock)
     finally:
-        bridge.close()
-    return 0
+        try:
+            listen_sock.close()
+        except OSError:
+            pass
+        try:
+            sock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
 
 
 if __name__ == "__main__":

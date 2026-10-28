@@ -209,7 +209,9 @@ full.
   every line with its type and value. Select one to edit it and read Unison's
   documentation for it, taken from the installed Unison. Type to filter,
   `↑`/`↓` to choose, `Enter` to edit, `Delete` to remove, and **Add
-  preference** for any of Unison's preferences.
+  preference** for Unison's preferences. Preferences that run programs or
+  include other files (`diff`, `merge`, `sshcmd`, …) can only be removed
+  here; omaSon forces safe values for them when scanning.
 
 **Save** (`Ctrl+S`) rewrites only the lines you changed: comments, blank
 lines, `include` lines and the order stay exactly as they were. Values are

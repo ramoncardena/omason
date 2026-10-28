@@ -203,6 +203,61 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, stderr)
         self.assertGreaterEqual(sum(json.loads(line)["type"] == "catalog" for line in stdout.splitlines()), 2)
 
+    def test_second_helper_shares_the_session(self):
+        def stop(proc):
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+            elif proc.stdin:
+                proc.stdin.close()
+
+        server = subprocess.Popen([str(ROOT / "bin/omason"), "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        self.addCleanup(stop, server)
+        # Wait until the server is listening, then attach a peer.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            line = server.stdout.readline()
+            if not line:
+                self.fail(server.stderr.read())
+            if json.loads(line).get("type") == "catalog":
+                break
+        else:
+            self.fail("server never sent a catalog")
+        client = subprocess.Popen([str(ROOT / "bin/omason"), "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        self.addCleanup(stop, client)
+        saw = []
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and len(saw) < 2:
+            line = client.stdout.readline()
+            if not line:
+                self.fail(client.stderr.read() or "client exited early")
+            event = json.loads(line)
+            if event.get("type") in ("catalog", "state"):
+                saw.append(event["type"])
+        self.assertIn("catalog", saw)
+        self.assertIn("state", saw)
+        (self.left / "shared.txt").write_text("from-client")
+        client.stdin.write('{"command":"start","profile":"test"}\n')
+        client.stdin.flush()
+        phase = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            line = server.stdout.readline()
+            if not line:
+                break
+            event = json.loads(line)
+            if event.get("type") == "state" and event.get("phase") == "warning":
+                client.stdin.write('{"command":"acknowledge"}\n')
+                client.stdin.flush()
+            elif event.get("type") == "state" and event.get("phase") in ("review", "complete", "error"):
+                phase = event["phase"]
+                break
+        self.assertEqual(phase, "review")
+        client.stdin.close()
+        server.stdin.close()
+        self.assertEqual(client.wait(timeout=10), 0)
+        self.assertEqual(server.wait(timeout=10), 0)
+
     def test_helper_eof_cancels_review_without_transfer(self):
         (self.left / "one").write_text("one")
         process = subprocess.Popen([str(ROOT / "bin/omason"), "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -381,7 +436,8 @@ class IntegrationTests(unittest.TestCase):
         (self.left / "Music").mkdir()
         (self.config / "pair-docs.prf").write_text(
             f"# mine\nroot = {self.left}\nroot = {self.right}\npath = Docs\nmountpoint = Docs\n"
-            "ignore = Name *.tmp\nlabel = Docs\ntimes = true\nperms = 0\n")
+            "ignore = Name *.tmp\nlabel = Docs\ntimes = true\nperms = 0\n"
+            "diff = /tmp/evil\nsshcmd = /tmp/evil-ssh\n")
         results = self.check(folder="Music", name="pair-music", template="pair-docs")
         self.assertEqual(results["folder"]["status"], "warn")
         self.assertIn("An empty Music folder will be created on right replica", results["folder"]["text"])
@@ -399,7 +455,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn(f"root = {self.left}\nroot = {self.right}\npath = Music\nmountpoint = Music\n", text)
         self.assertIn("ignore = Name *.log\nignore = Path cache\n", text)
         self.assertIn("times = true\nperms = 0", text)
-        for gone in ("path = Docs", "*.tmp", "label = Docs", "# mine"):
+        for gone in ("path = Docs", "*.tmp", "label = Docs", "# mine", "diff =", "sshcmd ="):
             self.assertNotIn(gone, text)
         (self.left / "Music" / "song.mp3").write_text("la")
         self.bridge.start("pair-music")
@@ -492,6 +548,29 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual((prefs["auto"]["type"], prefs["maxbackups"]["type"], prefs["ignore"]["list"]), ("bool", "int", True))
         self.assertIn("non-conflicting", prefs["auto"]["long"])
         self.assertGreater(len(prefs), 90)
+        self.assertTrue(prefs["diff"]["locked"])
+        self.assertTrue(prefs["sshcmd"]["locked"])
+        self.assertFalse(prefs["times"]["locked"])
+
+    def test_locked_prefs_cannot_be_added_or_changed(self):
+        self.profile.write_text(f"root = {self.left}\nroot = {self.right}\ndiff = diff -u\ntimes = true\n")
+        doc = self.load("test")
+        base = [dict(l) for l in doc["lines"]]
+        with self.assertRaisesRegex(ValueError, "sshcmd"):
+            self.command("save", name="test", hash=doc["hash"],
+                         lines=base + [{"orig": None, "kind": "pref", "key": "sshcmd", "value": "/tmp/evil"}])
+        changed = [dict(l) for l in base]
+        for line in changed:
+            if line["key"] == "diff":
+                line["value"] = "/tmp/evil %s %s"
+        with self.assertRaisesRegex(ValueError, "diff"):
+            self.command("save", name="test", hash=doc["hash"], lines=changed)
+        # Unchanged locked lines and removals are fine.
+        kept = [dict(l) for l in base if l["key"] != "diff"]
+        self.command("save", name="test", hash=doc["hash"], lines=kept)
+        text = self.profile.read_text()
+        self.assertNotIn("diff =", text)
+        self.assertIn("times = true", text)
 
     def test_rename_keeps_history_and_archive(self):
         (self.left / "one").write_text("one")

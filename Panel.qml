@@ -49,7 +49,11 @@ Panel {
     readonly property var prefInfo: host.prefsByName || ({})
     // Compared field by field: objects passed through QML models don't keep their key order.
     readonly property bool editDirty: !!editDoc && !Model.sameLines(editLines, editDoc.lines)
-    readonly property var editProblems: editLines.filter(function(l) { return l.kind === "pref" && !Model.prefValueOk(root.prefInfo[l.key], l.value) })
+    readonly property var editProblems: editLines.filter(function(l) {
+        if (l.kind !== "pref") return false
+        if (root.prefInfo[l.key] && root.prefInfo[l.key].locked && root.editDoc && Model.lineChanged(l, root.editDoc.lines)) return true
+        return !Model.prefValueOk(root.prefInfo[l.key], l.value)
+    })
     onLoadedDocChanged: if (editing && loadedDoc && loadedDoc.name === editName && !editDoc) {
         editDoc = loadedDoc
         editLines = JSON.parse(JSON.stringify(loadedDoc.lines))
@@ -341,6 +345,8 @@ Panel {
     }
     // All preferences tab: change, add or remove one line.
     function setEditLine(index, value) {
+        const line = editLines[index]
+        if (!line || (prefInfo[line.key] && prefInfo[line.key].locked)) return
         const lines = editLines.slice()
         lines[index] = Object.assign({}, lines[index], { value: value })
         editLines = lines
@@ -353,7 +359,7 @@ Panel {
     }
     function addEditPref(name) {
         const info = prefInfo[name]
-        if (!info) return
+        if (!info || info.locked) return
         const lines = editLines.slice()
         let at = lines.length
         lines.forEach(function(l, i) { if (l.kind === "pref" && l.key === name) at = i + 1 })
@@ -456,6 +462,7 @@ Panel {
         }
     }
     function activate() {
+        if (view === "session" && phase === "warning") { send("acknowledge"); return }
         if (!cursorActive) { cursorActive = true; return }
         if (view === "home") {
             if (!host.profiles.length) openCreate()
@@ -477,6 +484,7 @@ Panel {
         else if (view === "home" && text === "r") startScan(host.selectedProfile)
         else if (view === "home" && text === "p" && host.profiles.length) profilePicker.open()
         else if (view === "home" && text === "e") openEdit()
+        else if (view === "session" && phase === "warning" && text === "y") send("acknowledge")
         else if (view === "session" && text === "r" && finished) { const name = sessionState.profile; done(); startScan(name) }
         else if (view === "session" && text === "u" && row) setDirection(row, "default")
         else if (view === "session" && text === "d" && row) inspect(row)
@@ -572,7 +580,7 @@ Panel {
         if (view === "create") return "⏎ next field · Tab moves · Esc cancel"
         if (finished) return "R scan again · ⏎ / ⌫ done · V output"
         if (syncing) return "C stop sync · V output"
-        if (phase === "warning") return "C cancel · V output"
+        if (phase === "warning") return "⏎ / Y continue · C cancel · V output"
         return "←→ direction · X hold · U reset · D diff · F full diff · G sync · C cancel"
     }
 
@@ -1376,7 +1384,8 @@ Panel {
                                             event.accepted = true
                                         } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && root.editSelected >= 0) {
                                             const info = root.prefInfo[root.editLines[root.editSelected].key]
-                                            if (info && info.type === "bool") root.setEditLine(root.editSelected, Model.truthy(root.editLines[root.editSelected].value) ? "false" : "true")
+                                            if (info && info.locked) { /* view only */ }
+                                            else if (info && info.type === "bool") root.setEditLine(root.editSelected, Model.truthy(root.editLines[root.editSelected].value) ? "false" : "true")
                                             else editValueField.forceActiveFocus()
                                             event.accepted = true
                                         }
@@ -1389,7 +1398,7 @@ Panel {
                                     triggerLabel: "Add preference"
                                     placeholderText: "Search Unison's preferences…"
                                     // Names only: matching descriptions would put "retry" ("…N times") ahead of "times".
-                                    options: (root.host.prefs || []).map(function(p) { return { value: p.name, label: p.name } })
+                                    options: (root.host.prefs || []).filter(function(p) { return !p.locked }).map(function(p) { return { value: p.name, label: p.name } })
                                     value: ""
                                     fontFamily: root.family
                                     onChanged: function(value) { root.addEditPref(value) }
@@ -1455,7 +1464,7 @@ Panel {
                                         }
                                     }
                                     Toggle {
-                                        visible: !!prefDetail.info && prefDetail.info.type === "bool"
+                                        visible: !!prefDetail.info && prefDetail.info.type === "bool" && !prefDetail.info.locked
                                         width: parent.width
                                         label: checked ? "On" : "Off"
                                         checked: !!prefDetail.line && Model.truthy(prefDetail.line.value)
@@ -1466,7 +1475,7 @@ Panel {
                                     }
                                     TextField {
                                         id: editValueField
-                                        visible: !prefDetail.info || prefDetail.info.type !== "bool"
+                                        visible: (!prefDetail.info || prefDetail.info.type !== "bool") && !(prefDetail.info && prefDetail.info.locked)
                                         width: parent.width
                                         placeholderText: prefDetail.info && prefDetail.info.type === "int" ? "A number" : "Value"
                                         onTextEdited: root.setEditLine(root.editSelected, text)
@@ -1474,7 +1483,12 @@ Panel {
                                         onAccepted: editSearchField.forceActiveFocus()
                                     }
                                     Caption {
-                                        visible: !!prefDetail.line && !Model.prefValueOk(prefDetail.info, prefDetail.line.value)
+                                        visible: !!prefDetail.info && !!prefDetail.info.locked
+                                        text: "omaSon does not edit this preference (it can run a program or include other files). Remove the line here, or change it outside omaSon. Safe values are forced when scanning."
+                                        color: root.dim
+                                    }
+                                    Caption {
+                                        visible: !!prefDetail.line && !(prefDetail.info && prefDetail.info.locked) && !Model.prefValueOk(prefDetail.info, prefDetail.line.value)
                                         text: !prefDetail.info ? "Unison has no preference with this name; it can only be removed."
                                             : (prefDetail.info.type === "int" ? "Needs a whole number." : "Needs true or false.")
                                         color: root.urgent

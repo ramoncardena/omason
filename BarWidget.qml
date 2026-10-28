@@ -89,6 +89,14 @@ BarWidget {
         }
     }
 
+    // Exit 75: this instance was a client and the shared helper went away — restart
+    // so another monitor (or this one) can become the server. Other exits: show the
+    // error, then retry so a crashed helper does not leave the bar dead.
+    Timer {
+        id: helperRestart
+        interval: 400
+        onTriggered: if (!backend.running) backend.running = true
+    }
     Process {
         id: backend
         command: ["python3", root.helperPath, "serve"]
@@ -97,7 +105,12 @@ BarWidget {
         stdout: SplitParser { onRead: function(line) { root.receive(line) } }
         stderr: StdioCollector { id: diagnostics; waitForEnd: true }
         onExited: function(exitCode) {
+            if (exitCode === 75) {
+                helperRestart.restart()
+                return
+            }
             root.errorMessage = "omaSon helper stopped (" + exitCode + "). " + diagnostics.text.slice(-1000)
+            helperRestart.restart()
         }
     }
 
