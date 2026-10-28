@@ -67,6 +67,14 @@ BarWidget {
             } else if (data.type === "saved") {
                 notice = "Saved " + data.profile + "." + (data.note ? " " + data.note : "") + " The previous version was kept in omaSon's state folder."
                 if (panelLoader.item) panelLoader.item.closeEdit()
+            } else if (data.type === "renamed") {
+                selectedProfile = data.newName
+                notice = "Renamed " + data.profile + " to " + data.newName + "."
+                if (panelLoader.item) panelLoader.item.closeEdit()
+            } else if (data.type === "deleted") {
+                if (selectedProfile === data.profile) selectedProfile = ""
+                notice = "Deleted " + data.profile + ". A copy is kept in omaSon's state folder (deleted-profiles)."
+                if (panelLoader.item) panelLoader.item.closeEdit()
             } else if (data.type === "check") {
                 checks = data.results
             } else if (data.type === "created") {

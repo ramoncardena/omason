@@ -414,6 +414,49 @@ class Bridge:
         self.emit({"type": "saved", "profile": name, "backup": str(backup), "note": note})
         self.catalog()
 
+    def idle_profile(self, name):
+        self.read_profile(name)  # validates the name and that it exists
+        if self.child and self.state["profile"] == name:
+            raise ValueError("This profile is being reviewed or synced. Finish or cancel that first.")
+        return self.profile_file(name)
+
+    def rename_profile(self, name, new):
+        """Rename the profile file. Unison's archives follow the roots, so history is kept."""
+        path = self.idle_profile(name)
+        result = self.check_name(new)
+        if result["status"] != "ok":
+            raise ValueError(result["text"] or "Enter a new name.")
+        target = self.profile_file(new)
+        # A hard link refuses to replace an existing file; the old name is removed after.
+        try:
+            os.link(path, target)
+            path.unlink()
+        except OSError:
+            if target.exists():
+                raise ValueError("A profile with this name already exists.")
+            os.rename(path, target)
+        # Keep this profile's run history with it.
+        for record_path in self.state_dir.glob("*.json"):
+            try:
+                record = json.loads(record_path.read_text())
+                if record.get("profile") == name:
+                    record["profile"] = new
+                    record_path.write_text(json.dumps(record))
+            except (OSError, ValueError):
+                continue
+        self.emit({"type": "renamed", "profile": name, "newName": new})
+        self.catalog()
+
+    def delete_profile(self, name):
+        """Move the profile to omaSon's state folder; replicas and Unison's archives are untouched."""
+        path = self.idle_profile(name)
+        trash = self.state_dir / "deleted-profiles"
+        trash.mkdir(mode=0o700, exist_ok=True)
+        kept = trash / f"{name}.{time.strftime('%Y%m%dT%H%M%S')}.prf"
+        shutil.move(str(path), kept)
+        self.emit({"type": "deleted", "profile": name, "kept": str(kept)})
+        self.catalog()
+
     def check_name(self, name):
         if not name:
             return {"status": "", "text": ""}
@@ -850,6 +893,10 @@ class Bridge:
             self.load_profile(request.get("name"))
         elif cmd == "save":
             self.save_profile(request)
+        elif cmd == "rename":
+            self.rename_profile(request.get("name"), str(request.get("newName", "")).strip())
+        elif cmd == "delete":
+            self.delete_profile(request.get("name"))
         elif cmd == "start":
             self.start(request.get("profile"))
         elif cmd == "acknowledge" and phase == "warning":

@@ -36,6 +36,15 @@ Panel {
     property int editSelected: -1
     property string editSearch: ""
     property bool editRoots: false
+    property bool confirmDelete: false
+    // Show the whole confirmation and start on the safe choice.
+    onConfirmDeleteChanged: if (confirmDelete) Qt.callLater(function() { root.scrollIntoView(deleteCard); keepButton.forceActiveFocus() })
+    readonly property bool canRename: {
+        const name = editRenameField.text.trim()
+        const result = host.checks ? host.checks.name : null
+        return editing && !!editDoc && name !== "" && name !== editName && !editDirty
+            && !!result && result.value === name && result.status === "ok"
+    }
     readonly property var loadedDoc: host.profileDoc || null
     readonly property var prefInfo: host.prefsByName || ({})
     // Compared field by field: objects passed through QML models don't keep their key order.
@@ -273,13 +282,16 @@ Panel {
         editSelected = -1
         editSearch = ""
         editRoots = false
-        for (const field of [editDescription, editFolderAdd, editIgnoreAdd, editSearchField, editMaxBackups]) field.text = ""
+        confirmDelete = false
+        for (const field of [editDescription, editFolderAdd, editIgnoreAdd, editSearchField, editMaxBackups, editRenameField]) field.text = ""
         if (root.hostWidget) { root.hostWidget.profileDoc = null; root.hostWidget.notice = ""; root.hostWidget.checks = ({}) }
         editing = true
         send("profile", { name: editName })
         if (!host.prefs || !host.prefs.length) send("prefs")
     }
-    function closeEdit() { editing = false; editDoc = null; keyCatcher.forceActiveFocus() }
+    function closeEdit() { editing = false; editDoc = null; confirmDelete = false; keyCatcher.forceActiveFocus() }
+    function renameProfile() { if (canRename) send("rename", { name: editName, newName: editRenameField.text.trim() }) }
+    function deleteProfile() { send("delete", { name: editName }) }
     function saveEdit() {
         if (!editDirty || editProblems.length) return
         send("save", { name: editName, hash: editDoc.hash, lines: editLines })
@@ -569,7 +581,7 @@ Panel {
         id: checkTimer
         interval: 250
         onTriggered: root.send("check", root.view === "edit"
-            ? { fields: { left: editLeft.unisonRoot, right: editRight.unisonRoot, folder: editFolderAdd.text, ignore: editIgnoreAdd.text }, template: root.editName, editing: true }
+            ? { fields: { left: editLeft.unisonRoot, right: editRight.unisonRoot, folder: editFolderAdd.text, ignore: editIgnoreAdd.text, name: editRenameField.text }, template: root.editName, editing: true }
             : { fields: root.formFields(), template: root.formTemplate })
     }
     Timer { interval: 30000; running: root.opened; repeat: true; onTriggered: root.now = Date.now() }
@@ -1239,6 +1251,97 @@ Panel {
                                 accent: root.accent
                                 fontFamily: root.family
                                 onClicked: root.setEditFlag("fat", !checked, false)
+                            }
+
+                            FieldLabel { text: "PROFILE"; topPadding: Style.space(6) }
+                            Row {
+                                width: parent.width
+                                spacing: Style.space(8)
+                                TextField {
+                                    id: editRenameField
+                                    width: parent.width - renameButton.width - parent.spacing
+                                    placeholderText: "Rename to…"
+                                    onTextChanged: root.scheduleCheck()
+                                    onAccepted: root.renameProfile()
+                                }
+                                Button {
+                                    id: renameButton
+                                    text: "Rename"
+                                    bordered: true
+                                    focusable: true
+                                    enabled: root.canRename
+                                    opacity: enabled ? 1 : 0.55
+                                    fontFamily: root.family
+                                    height: editRenameField.implicitHeight
+                                    onClicked: root.renameProfile()
+                                }
+                            }
+                            CheckLine { visible: current && !root.editDirty; field: "name"; value: editRenameField.text }
+                            Caption {
+                                visible: root.editDirty && editRenameField.text.trim() !== ""
+                                text: "Save or discard your changes before renaming."
+                                color: root.urgent
+                            }
+                            Caption { text: "Unison's sync history follows the replicas, not the profile name, so renaming keeps it." }
+
+                            Button {
+                                visible: !root.confirmDelete
+                                text: "Delete profile…"
+                                bordered: true
+                                focusable: true
+                                foreground: root.urgent
+                                fontFamily: root.family
+                                onClicked: root.confirmDelete = true
+                            }
+                            CursorSurface {
+                                id: deleteCard
+                                visible: root.confirmDelete
+                                width: parent.width
+                                bordered: true
+                                foreground: root.urgent
+                                implicitHeight: deleteColumn.implicitHeight + Style.space(20)
+                                Column {
+                                    id: deleteColumn
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.margins: Style.space(12)
+                                    spacing: Style.space(8)
+                                    Text {
+                                        width: parent.width
+                                        textFormat: Text.PlainText
+                                        text: Model.glyph.conflict + "  Delete " + root.editName + "?"
+                                        color: root.urgent
+                                        font.family: root.family
+                                        font.pixelSize: Style.font.body
+                                        font.bold: true
+                                    }
+                                    Caption {
+                                        text: "The profile file is moved to omaSon's state folder, so it can be restored. Your files and Unison's archives are left alone; other profiles on the same replicas keep working."
+                                    }
+                                    Row {
+                                        width: parent.width
+                                        spacing: Style.space(8)
+                                        Button {
+                                            width: (parent.width - parent.spacing) / 2
+                                            text: "Delete profile"
+                                            bordered: true
+                                            focusable: true
+                                            foreground: root.urgent
+                                            fontFamily: root.family
+                                            onClicked: root.deleteProfile()
+                                        }
+                                        Button {
+                                            id: keepButton
+                                            width: (parent.width - parent.spacing) / 2
+                                            text: "Keep it"
+                                            bordered: true
+                                            focusable: true
+                                            fontFamily: root.family
+                                            onClicked: root.confirmDelete = false
+                                        }
+                                    }
+                                }
                             }
                         }
 

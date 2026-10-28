@@ -493,6 +493,43 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("non-conflicting", prefs["auto"]["long"])
         self.assertGreater(len(prefs), 90)
 
+    def test_rename_keeps_history_and_archive(self):
+        (self.left / "one").write_text("one")
+        self.scan()
+        self.apply()
+        self.command("rename", name="test", newName="renamed")
+        self.assertFalse(self.profile.exists())
+        self.assertTrue((self.config / "renamed.prf").exists())
+        records = [json.loads(p.read_text()) for p in (self.state_dir / "omason").glob("*.json")]
+        self.assertEqual({r["profile"] for r in records}, {"renamed"})
+        (self.left / "two").write_text("two")
+        self.bridge.start("renamed")
+        self.assertEqual(self.wait({"review"}), "review")
+        # Same archive: only the new file is a change, not a first sync.
+        self.assertEqual([i["path"] for i in self.bridge.state["items"]], ["two"])
+        self.command("cancel")
+        self.wait({"cancelled"})
+        (self.config / "other.prf").write_text(f"root = {self.left}\nroot = {self.right}\n")
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self.command("rename", name="renamed", newName="other")
+        with self.assertRaisesRegex(ValueError, "letter or number"):
+            self.command("rename", name="renamed", newName="../x")
+
+    def test_delete_moves_profile_aside(self):
+        (self.left / "one").write_text("one")
+        self.scan()
+        with self.assertRaisesRegex(ValueError, "being reviewed"):
+            self.command("delete", name="test")
+        self.command("cancel")
+        self.wait({"cancelled"})
+        archives = sorted(p.name for p in self.config.glob("ar*"))
+        self.command("delete", name="test")
+        deleted = next(e for e in self.events if e["type"] == "deleted")
+        self.assertFalse(self.profile.exists())
+        self.assertIn(f"root = {self.left}", Path(deleted["kept"]).read_text())
+        self.assertEqual(sorted(p.name for p in self.config.glob("ar*")), archives)
+        self.assertTrue((self.left / "one").exists())
+
     def test_root_checks(self):
         (self.root / "file").write_text("x")
         results = self.check(left=str(self.left), right=str(self.root / "missing"))

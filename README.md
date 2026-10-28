@@ -91,6 +91,15 @@ omarchy-shell shell summon io.github.ramoncardena.omason '{}'
      `Delete` to remove; **Add preference** lists all of Unison's
      preferences.
 
+   - **Profile**: **Rename** changes the profile's file name and moves its
+     run history with it; Unison's archives are keyed by the replicas, not
+     the name, so the sync history is kept. **Delete profile…** asks for
+     confirmation, then moves the profile file to
+     `$XDG_STATE_HOME/omason/deleted-profiles/` so it can be restored. Your
+     files and Unison's archives are left alone (profiles on the same
+     replicas share them). Neither works while that profile is being
+     reviewed or synced.
+
    Saving (`Ctrl+S`) rewrites only the lines you changed; comments, blank
    lines, `include` lines and the order are kept exactly. Values are checked
    against Unison's types, unknown preference names are refused, the
